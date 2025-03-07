@@ -3,14 +3,27 @@ requires = ["maturin>=1.8,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "grpo_rewards"
-requires-python = ">=3.8"
+name = "oumi_grpo_rewards"
+dynamic = ["version"]
+requires-python = ">=3.9"
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",    
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/oumi-ai/roumi"
+Issues = "https://github.com/oumi-ai/roumi/issues"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
