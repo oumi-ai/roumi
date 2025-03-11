@@ -1,0 +1,3 @@
+[submodule "oumi"]
+	path = oumi
+	url = https://github.com/oumi-ai/oumi.git
