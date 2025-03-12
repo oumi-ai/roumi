@@ -5,7 +5,11 @@ trait Calculator: Send + Sync {
     where
         Self: Sized;
 
-    fn compute_rewards(&self, prompts: &Vec<String>, completions: &Vec<String>) -> Vec<f32>;
+    fn compute_rewards(
+        &self,
+        prompts: &Vec<String>,
+        completions: &Vec<String>,
+    ) -> anyhow::Result<Vec<f32>>;
 }
 
 #[pyclass]
@@ -30,12 +34,16 @@ impl Calculator for CompletionNegativeLengthCalculator {
         CompletionNegativeLengthCalculator
     }
 
-    fn compute_rewards(&self, _prompts: &Vec<String>, completions: &Vec<String>) -> Vec<f32> {
+    fn compute_rewards(
+        &self,
+        _prompts: &Vec<String>,
+        completions: &Vec<String>,
+    ) -> anyhow::Result<Vec<f32>> {
         let mut result: Vec<f32> = Vec::<f32>::with_capacity(completions.len());
         for completion in completions {
             result.push(-(completion.len() as f32));
         }
-        result
+        Ok(result)
     }
 }
 
@@ -51,6 +59,7 @@ impl GrpoRewards {
             ));
         }
 
+        // TODO Refactor into calculator builder function.
         let calculator: Box<dyn Calculator>;
         match function_name {
             "CompletionNegativeLengthCalculator" => {
@@ -71,7 +80,7 @@ impl GrpoRewards {
     fn compute_rewards(&self) -> PyResult<Vec<f32>> {
         let rewards: Vec<f32> = self
             .calculator
-            .compute_rewards(&self.prompts, &self.completions);
+            .compute_rewards(&self.prompts, &self.completions)?;
         Ok(rewards)
     }
 }

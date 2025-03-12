@@ -9,4 +9,5 @@ name = "grpo_rewards"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = "0.23.3"
+anyhow = "*"
+pyo3 = { version = "0.23.3", features = ["anyhow"] }
