@@ -1,10 +1,5 @@
 use pyo3::{exceptions::PyValueError, prelude::*};
 
-/// Formats the sum of two numbers as string.
-#[pyfunction]
-fn sum_as_string(a: usize, b: usize) -> PyResult<String> {
-    Ok((a + b).to_string())
-}
 
 trait Calculator: Send + Sync {
     fn new() -> Self
@@ -84,7 +79,6 @@ impl GrpoRewards {
 /// A Python module implemented in Rust.
 #[pymodule]
 fn grpo_rewards(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(sum_as_string, m)?)?;
     m.add_class::<GrpoRewards>()?;
     Ok(())
 }
