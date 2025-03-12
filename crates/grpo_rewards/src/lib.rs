@@ -1,4 +1,5 @@
-use pyo3::{exceptions::PyValueError, prelude::*};
+use pyo3::{exceptions::PyValueError, prelude::*, types::PyDict};
+use std::collections::HashMap;
 
 trait Calculator: Send + Sync {
     fn new() -> Self
@@ -50,7 +51,13 @@ impl Calculator for CompletionNegativeLengthCalculator {
 #[pymethods]
 impl GrpoRewards {
     #[new]
-    fn new(function_name: &str, prompts: Vec<String>, completions: Vec<String>) -> PyResult<Self> {
+    #[pyo3(signature = (function_name, prompts, completions, **function_kwargs))]
+    fn new(
+        function_name: &str,
+        prompts: Vec<String>,
+        completions: Vec<String>,
+        function_kwargs: Option<&PyDict>,
+    ) -> PyResult<Self> {
         if completions.is_empty() {
             return Err(PyValueError::new_err("Completions cannot be empty."));
         } else if !prompts.is_empty() && (prompts.len() != completions.len()) {
@@ -58,6 +65,11 @@ impl GrpoRewards {
                 "Prompts and completions must have the same length.",
             ));
         }
+
+        let options: HashMap<&str, &PyAny> = match kwargs {
+            Some(py_dict) => py_dict.extract()?,
+            None => HashMap::new(),
+        };
 
         // TODO Refactor into calculator builder function.
         let calculator: Box<dyn Calculator>;
