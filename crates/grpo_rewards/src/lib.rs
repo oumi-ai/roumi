@@ -56,19 +56,28 @@ impl GrpoRewards {
             ));
         }
 
+        let calculator: Box<dyn Calculator>;
+        match function_name {
+            "CompletionNegativeLengthCalculator" => {
+                calculator = Box::new(CompletionNegativeLengthCalculator::new())
+            }
+            _ => return Err(PyValueError::new_err("Unknown calculator.")),
+        }
+
         Ok(GrpoRewards {
             prompts,
             completions,
             function_name: function_name.to_string(),
+            calculator,
         })
     }
 
     #[pyo3(signature = ())]
-    fn compute(&self) -> PyResult<Vec<f32>> {
+    fn compute_rewards(&self) -> PyResult<Vec<f32>> {
         let rewards: Vec<f32> = self
             .calculator
             .compute_rewards(&self.prompts, &self.completions);
-        Ok(0.0)
+        Ok(rewards)
     }
 }
 
