@@ -1,6 +1,5 @@
 use pyo3::{exceptions::PyValueError, prelude::*};
 
-
 trait Calculator: Send + Sync {
     fn new() -> Self
     where
@@ -23,6 +22,7 @@ pub struct GrpoRewards {
     calculator: Box<dyn Calculator>,
 }
 
+// Dummy sample calculator.
 struct CompletionNegativeLengthCalculator;
 
 impl Calculator for CompletionNegativeLengthCalculator {
