@@ -32,7 +32,8 @@ pub struct GrpoRewards {
 struct CompletionNegativeLengthCalculator;
 
 impl Calculator for CompletionNegativeLengthCalculator {
-    fn new(_params: HashMap<String, String>) -> Self {
+    fn new(params: HashMap<String, String>) -> Self {
+        println!("CompletionNegativeLengthCalculator: {:?}", params);
         CompletionNegativeLengthCalculator
     }
 
@@ -80,7 +81,7 @@ fn convert_pydict_to_str2str_map(d: Option<&Bound<'_, PyDict>>) -> HashMap<Strin
 #[pymethods]
 impl GrpoRewards {
     #[new]
-    #[pyo3(signature = (function_name, prompts, completions, function_params=None))]
+    #[pyo3(signature = (function_name, prompts, completions, *, function_params=None))]
     fn py_new(
         function_name: &str,
         prompts: Vec<String>,
