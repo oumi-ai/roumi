@@ -71,7 +71,7 @@ fn convert_pydict_to_str2str_map(d: Option<&Bound<'_, PyDict>>) -> HashMap<Strin
                 (key, value)
             })
             .collect();
-        Some(x)
+        x
     } else {
         HashMap::new()
     }
