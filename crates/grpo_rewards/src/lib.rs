@@ -32,7 +32,7 @@ pub struct GrpoRewards {
 struct CompletionNegativeLengthCalculator;
 
 impl Calculator for CompletionNegativeLengthCalculator {
-    fn new(params: HashMap<String, String>) -> Self {
+    fn new(_params: HashMap<String, String>) -> Self {
         CompletionNegativeLengthCalculator
     }
 
@@ -49,31 +49,30 @@ impl Calculator for CompletionNegativeLengthCalculator {
     }
 }
 
-fn convert_pydict_to_str2str_map(d: Option<&Bound<'_, PyDict>>) -> HashMap<String, String> {
+fn convert_pydict_to_str2str_map(
+    d: Option<&Bound<'_, PyDict>>,
+) -> anyhow::Result<HashMap<String, String>> {
     if let Some(params) = d {
-        let x: HashMap<String, String> = params
-            .iter()
-            .map(|(key, value)| {
-                let key: String = key
-                    .str()
-                    .map_err(|_| {
-                        PyTypeError::new_err("function_params's key is not convertible to string")
-                    })
-                    .unwrap()
-                    .to_string();
-                let value: String = value
-                    .str()
-                    .map_err(|_| {
-                        PyTypeError::new_err("function_params's value is not convertible to string")
-                    })
-                    .unwrap()
-                    .to_string();
-                (key, value)
-            })
-            .collect();
-        x
+        let mut x: HashMap<String, String> = HashMap::with_capacity(params.len());
+
+        for (key, value) in params.iter() {
+            let key: String = key
+                .str()
+                .map_err(|_| {
+                    PyTypeError::new_err("function_params's key is not convertible to string")
+                })?
+                .to_string();
+            let value: String = value
+                .str()
+                .map_err(|_| {
+                    PyTypeError::new_err("function_params's value is not convertible to string")
+                })?
+                .to_string();
+            x.insert(key, value);
+        }
+        Ok(x)
     } else {
-        HashMap::new()
+        Ok(HashMap::new())
     }
 }
 
@@ -95,7 +94,7 @@ impl GrpoRewards {
             ));
         }
 
-        let internal_func_params = convert_pydict_to_str2str_map(function_params);
+        let internal_func_params = convert_pydict_to_str2str_map(function_params)?;
 
         // TODO Refactor into calculator builder function.
         let calculator: Box<dyn Calculator>;
