@@ -1,4 +1,5 @@
-use pyo3::{exceptions::PyValueError, prelude::*, types::PyDict};
+use pyo3::types::PyDict;
+use pyo3::{exceptions::PyTypeError, exceptions::PyValueError, prelude::*};
 use std::collections::HashMap;
 
 trait Calculator: Send + Sync {
@@ -48,15 +49,43 @@ impl Calculator for CompletionNegativeLengthCalculator {
     }
 }
 
+fn convert_pydict_to_str2str_map(d: Option<&Bound<'_, PyDict>>) -> HashMap<String, String> {
+    if let Some(params) = d {
+        let x: HashMap<String, String> = params
+            .iter()
+            .map(|(key, value)| {
+                let key: String = key
+                    .str()
+                    .map_err(|_| {
+                        PyTypeError::new_err("function_params's key is not convertible to string")
+                    })
+                    .unwrap()
+                    .to_string();
+                let value: String = value
+                    .str()
+                    .map_err(|_| {
+                        PyTypeError::new_err("function_params's value is not convertible to string")
+                    })
+                    .unwrap()
+                    .to_string();
+                (key, value)
+            })
+            .collect();
+        x
+    } else {
+        HashMap::new()
+    }
+}
+
 #[pymethods]
 impl GrpoRewards {
     #[new]
-    #[pyo3(signature = (function_name, prompts, completions, **function_kwargs))]
-    fn new(
+    #[pyo3(signature = (function_name, prompts, completions, function_params=None))]
+    fn py_new(
         function_name: &str,
         prompts: Vec<String>,
         completions: Vec<String>,
-        function_kwargs: Option<&PyDict>,
+        function_params: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         if completions.is_empty() {
             return Err(PyValueError::new_err("Completions cannot be empty."));
@@ -66,10 +95,7 @@ impl GrpoRewards {
             ));
         }
 
-        let options: HashMap<&str, &PyAny> = match kwargs {
-            Some(py_dict) => py_dict.extract()?,
-            None => HashMap::new(),
-        };
+        let _internal_func_params = convert_pydict_to_str2str_map(function_params);
 
         // TODO Refactor into calculator builder function.
         let calculator: Box<dyn Calculator>;
