@@ -33,7 +33,6 @@ struct CompletionNegativeLengthCalculator;
 
 impl Calculator for CompletionNegativeLengthCalculator {
     fn new(params: HashMap<String, String>) -> Self {
-        println!("CompletionNegativeLengthCalculator: {:?}", params);
         CompletionNegativeLengthCalculator
     }
 
