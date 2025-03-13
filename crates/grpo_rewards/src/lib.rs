@@ -3,7 +3,7 @@ use pyo3::{exceptions::PyTypeError, exceptions::PyValueError, prelude::*};
 use std::collections::HashMap;
 
 trait Calculator: Send + Sync {
-    fn new() -> Self
+    fn new(params: HashMap<String, String>) -> Self
     where
         Self: Sized;
 
@@ -32,7 +32,7 @@ pub struct GrpoRewards {
 struct CompletionNegativeLengthCalculator;
 
 impl Calculator for CompletionNegativeLengthCalculator {
-    fn new() -> Self {
+    fn new(_params: HashMap<String, String>) -> Self {
         CompletionNegativeLengthCalculator
     }
 
@@ -71,7 +71,7 @@ fn convert_pydict_to_str2str_map(d: Option<&Bound<'_, PyDict>>) -> HashMap<Strin
                 (key, value)
             })
             .collect();
-        x
+        Some(x)
     } else {
         HashMap::new()
     }
@@ -95,13 +95,15 @@ impl GrpoRewards {
             ));
         }
 
-        let _internal_func_params = convert_pydict_to_str2str_map(function_params);
+        let internal_func_params = convert_pydict_to_str2str_map(function_params);
 
         // TODO Refactor into calculator builder function.
         let calculator: Box<dyn Calculator>;
         match function_name {
             "CompletionNegativeLengthCalculator" => {
-                calculator = Box::new(CompletionNegativeLengthCalculator::new())
+                calculator = Box::new(CompletionNegativeLengthCalculator::new(
+                    internal_func_params,
+                ))
             }
             _ => return Err(PyValueError::new_err("Unknown calculator.")),
         }
