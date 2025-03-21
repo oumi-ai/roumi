@@ -2,7 +2,7 @@ use pyo3::types::PyDict;
 use pyo3::{exceptions::PyTypeError, exceptions::PyValueError, prelude::*};
 use std::collections::HashMap;
 
-trait Calculator: Send + Sync {
+pub trait Calculator: Send + Sync {
     fn new(params: HashMap<String, String>) -> Self
     where
         Self: Sized;
@@ -29,7 +29,7 @@ pub struct GrpoRewards {
 }
 
 // Dummy sample calculator.
-struct CompletionNegativeLengthCalculator;
+pub struct CompletionNegativeLengthCalculator;
 
 impl Calculator for CompletionNegativeLengthCalculator {
     fn new(_params: HashMap<String, String>) -> Self {
