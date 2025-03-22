@@ -79,23 +79,12 @@ fn convert_pydict_to_str2str_map(
 #[pymethods]
 impl GrpoRewards {
     #[new]
-    #[pyo3(signature = (function_name, prompts, completions, *, function_params=None))]
+    #[pyo3(signature = (function_name, *, function_params=None))]
     fn py_new(
         function_name: &str,
-        prompts: Vec<String>,
-        completions: Vec<String>,
         function_params: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        if completions.is_empty() {
-            return Err(PyValueError::new_err("Completions cannot be empty."));
-        } else if !prompts.is_empty() && (prompts.len() != completions.len()) {
-            return Err(PyValueError::new_err(
-                "Prompts and completions must have the same length.",
-            ));
-        }
-
         let internal_func_params = convert_pydict_to_str2str_map(function_params)?;
-
         // TODO Refactor into calculator builder function.
         let calculator: Box<dyn Calculator>;
         match function_name {
@@ -106,20 +95,26 @@ impl GrpoRewards {
             }
             _ => return Err(PyValueError::new_err("Unknown calculator.")),
         }
-
+        
         Ok(GrpoRewards {
-            prompts,
-            completions,
+            prompts: Vec::new(),
+            completions: Vec::new(),
             function_name: function_name.to_string(),
             calculator,
         })
     }
 
-    #[pyo3(signature = ())]
-    fn compute_rewards(&self) -> PyResult<Vec<f32>> {
-        let rewards: Vec<f32> = self
-            .calculator
-            .compute_rewards(&self.prompts, &self.completions)?;
+    #[pyo3(signature = (prompts, completions))]
+    fn compute_rewards(&self, prompts: Vec<String>, completions: Vec<String>) -> PyResult<Vec<f32>> {
+        if completions.is_empty() {
+            return Err(PyValueError::new_err("Completions cannot be empty."));
+        } else if !prompts.is_empty() && (prompts.len() != completions.len()) {
+            return Err(PyValueError::new_err(
+                "Prompts and completions must have the same length.",
+            ));
+        }
+
+        let rewards: Vec<f32> = self.calculator.compute_rewards(&prompts, &completions)?;
         Ok(rewards)
     }
 }

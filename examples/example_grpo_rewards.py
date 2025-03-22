@@ -17,21 +17,19 @@ def main():
     # Create a GrpoRewards instance with the CompletionNegativeLengthCalculator
     rewards_calculator = GrpoRewards(
         function_name="CompletionNegativeLengthCalculator",
-        prompts=prompts,
-        completions=completions,
         function_params={"param1": "value1"}  # Optional parameters as dict
     )
     
     # Compute the rewards
-    rewards = rewards_calculator.compute_rewards()
+    rewards = rewards_calculator.compute_rewards(prompts, completions)
     
     # Print the results
     print("Prompts:")
-    for i, prompt in enumerate(rewards_calculator.prompts):
+    for i, prompt in enumerate(prompts):
         print(f"  {i}: {prompt}")
     
     print("\nCompletions:")
-    for i, completion in enumerate(rewards_calculator.completions):
+    for i, completion in enumerate(completions):
         print(f"  {i}: {completion}")
     
     print("\nRewards (negative length of completions):")
