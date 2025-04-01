@@ -1,52 +1,23 @@
+// crates/grpo_rewards/src/lib.rs
+use pyo3::prelude::*;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::types::PyDict;
-use pyo3::{exceptions::PyTypeError, exceptions::PyValueError, prelude::*};
 use std::collections::HashMap;
 
-pub trait Calculator: Send + Sync {
-    fn new(params: HashMap<String, String>) -> Self
-    where
-        Self: Sized;
-
-    fn compute_rewards(
-        &self,
-        prompts: &Vec<String>,
-        completions: &Vec<String>,
-    ) -> anyhow::Result<Vec<f32>>;
-}
+// Create the rewards module and make it public
+pub mod rewards;
+use rewards::{
+    Calculator, 
+    CompletionNegativeLengthCalculator,
+    CompletionSameLengthAsPromptCalculator,
+};
 
 #[pyclass]
 pub struct GrpoRewards {
-    #[pyo3(get)]
-    pub prompts: Vec<String>,
-
-    #[pyo3(get)]
-    pub completions: Vec<String>,
-
-    #[pyo3(get)]
-    pub function_name: String,
-    // TODO: Add kwargs dict.
+    prompts: Vec<String>,
+    completions: Vec<String>,
+    function_name: String,
     calculator: Box<dyn Calculator>,
-}
-
-// Dummy sample calculator.
-pub struct CompletionNegativeLengthCalculator;
-
-impl Calculator for CompletionNegativeLengthCalculator {
-    fn new(_params: HashMap<String, String>) -> Self {
-        CompletionNegativeLengthCalculator
-    }
-
-    fn compute_rewards(
-        &self,
-        _prompts: &Vec<String>,
-        completions: &Vec<String>,
-    ) -> anyhow::Result<Vec<f32>> {
-        let mut result: Vec<f32> = Vec::<f32>::with_capacity(completions.len());
-        for completion in completions {
-            result.push(-(completion.len() as f32));
-        }
-        Ok(result)
-    }
 }
 
 fn convert_pydict_to_str2str_map(
@@ -85,16 +56,15 @@ impl GrpoRewards {
         function_params: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         let internal_func_params = convert_pydict_to_str2str_map(function_params)?;
-        // TODO Refactor into calculator builder function.
-        let calculator: Box<dyn Calculator>;
-        match function_name {
+        
+        // Factory pattern to create the right calculator
+        let calculator: Box<dyn Calculator> = match function_name {
             "CompletionNegativeLengthCalculator" => {
-                calculator = Box::new(CompletionNegativeLengthCalculator::new(
-                    internal_func_params,
-                ))
+                Box::new(CompletionNegativeLengthCalculator::new(internal_func_params))
             }
+            // Add other calculator types here
             _ => return Err(PyValueError::new_err("Unknown calculator.")),
-        }
+        };
         
         Ok(GrpoRewards {
             prompts: Vec::new(),
@@ -272,5 +242,79 @@ mod tests {
         // Verify results
         assert_eq!(rewards.len(), 1);
         assert_eq!(rewards[0], -7.0);
+    }
+    
+    #[test]
+    fn test_completion_same_length_as_prompt_calculator() {
+        // Create a new instance of the calculator
+        let calculator = CompletionSameLengthAsPromptCalculator::new(HashMap::new());
+        
+        // Test case 1: Completions with different lengths relative to prompts
+        let prompts = vec![
+            "What is the capital of France?".to_string(),  // Length: 30
+            "Explain".to_string(),                         // Length: 7
+            "Tell me about quantum physics".to_string()    // Length: 29
+        ];
+        
+        let completions = vec![
+            "Paris".to_string(),                           // Length: 5 (diff: 25)
+            "Quantum mechanics is fascinating".to_string(), // Length: 31 (diff: 24)
+            "It's a branch of physics".to_string()         // Length: 26 (diff: 3)
+        ];
+        
+        let rewards = calculator.compute_rewards(&prompts, &completions).unwrap();
+        
+        assert_eq!(rewards.len(), 3);
+        assert_eq!(rewards[0], -25.0);  // -(|5 - 30|)
+        assert_eq!(rewards[1], -25.0);  // -(|31 - 7|)
+        assert_eq!(rewards[2], -5.0);   // -(|26 - 29|)
+        
+        // Test case 2: Perfect length match (should give 0 penalty)
+        let exact_prompts = vec!["Test".to_string()]; // Length: 4
+        let exact_completions = vec!["Four".to_string()]; // Length: 4
+        
+        let rewards = calculator.compute_rewards(&exact_prompts, &exact_completions).unwrap();
+        
+        assert_eq!(rewards.len(), 1);
+        assert_eq!(rewards[0], 0.0);  // -(|4 - 4|) = 0
+        
+        // Test case 3: Empty completions
+        let empty_completions: Vec<String> = vec![];
+        let rewards = calculator.compute_rewards(&prompts, &empty_completions).unwrap();
+        
+        assert_eq!(rewards.len(), 0);
+        
+        // Test case 4: Empty prompts
+        let empty_prompts: Vec<String> = vec![];
+        let completions = vec![
+            "Response 1".to_string(),  // Length: 10
+            "Response 2".to_string()   // Length: 10
+        ];
+        
+        let rewards = calculator.compute_rewards(&empty_prompts, &completions).unwrap();
+        
+        assert_eq!(rewards.len(), 2);
+        assert_eq!(rewards[0], -10.0);  // -(10) since there's no prompt
+        assert_eq!(rewards[1], -10.0);  // -(10) since there's no prompt
+        
+        // Test case 5: Empty strings
+        let empty_string_prompts = vec!["".to_string(), "Something".to_string()];
+        let empty_string_completions = vec!["Response".to_string(), "".to_string()];
+        
+        let rewards = calculator.compute_rewards(&empty_string_prompts, &empty_string_completions).unwrap();
+        
+        assert_eq!(rewards.len(), 2);
+        assert_eq!(rewards[0], -8.0);    // -(|8 - 0|)
+        assert_eq!(rewards[1], -9.0);    // -(|0 - 9|)
+        
+        // Test case 6: Unicode characters
+        let unicode_prompts = vec!["München".to_string()]; // 7 characters
+        let unicode_completions = vec!["Berlin😊".to_string()]; // 7 characters (6 + emoji)
+        
+        let rewards = calculator.compute_rewards(&unicode_prompts, &unicode_completions).unwrap();
+        
+        assert_eq!(rewards.len(), 1);
+        println!("{:?}",rewards);
+        assert_eq!(rewards[0], 0.0);  // Both have 7 characters, so reward is 0
     }
 }

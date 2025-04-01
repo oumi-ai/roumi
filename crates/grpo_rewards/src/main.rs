@@ -1,8 +1,8 @@
+// crates/grpo_rewards/src/main.rs
 use std::collections::HashMap;
 
-// Import both the struct and the trait
-use grpo_rewards::CompletionNegativeLengthCalculator;
-use grpo_rewards::Calculator; // This is the important addition
+// Import from the rewards module
+use grpo_rewards::rewards::{Calculator, CompletionNegativeLengthCalculator};
 
 fn main() -> anyhow::Result<()> {
     // Create sample data
