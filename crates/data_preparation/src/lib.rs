@@ -79,21 +79,18 @@ impl SafetensorsDataset{
                 let (dtype, bytes) = match tensor.kind() {
                     Kind::Float => {
                         let mut data = vec![0.0f32; num_elements];
-                        // **FIX 3: Pass num_elements (usize) directly**
                         tensor.copy_data(&mut data, num_elements);
                         let byte_data = data.into_iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
                         (Dtype::F32, byte_data)
                     }
                     Kind::Int64 => {
                          let mut data = vec![0i64; num_elements];
-                         // **FIX 3: Pass num_elements (usize) directly**
                          tensor.copy_data(&mut data, num_elements);
                          let byte_data = data.into_iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
                         (Dtype::I64, byte_data)
                     }
                     Kind::Bool => {
                         let mut data = vec![0u8; num_elements];
-                        // **FIX 3: Pass num_elements (usize) directly**
                         tensor.copy_data(&mut data, num_elements);
                         (Dtype::BOOL, data)
                     }
@@ -143,6 +140,8 @@ impl SafetensorsDataset{
         file.write_all(&serialized)?;
         Ok(())
     }
+
+    
 }
 
 
