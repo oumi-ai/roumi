@@ -8,3 +8,9 @@ repository.workspace = true
 description.workspace = true
 
 [dependencies]
+tch = "0.15.0"
+safetensors = "0.5.3"
+ndarray = "0.15" 
+
+[dev-dependencies]
+tempdir = "0.3" # Used in tests to create temporary directories for saving safetensors files. 

@@ -1,14 +1,24 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+use tch::Tensor; 
+use std::collections::HashMap;
+
+// Represents a dataset as a dictionary of lists of tensors 
+#[derive(Debug)]
+pub struct Dataset{
+    pub tensors: HashMap<String, Vec<Tensor>>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+impl Dataset{
+    pub fn new(tensors: HashMap<String, Vec<Tensor>>) -> Self{
+        Dataset{tensors}
+    }
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    pub fn len(&self) -> usize {
+        self.tensors.values().next().map_or(0, |v| v.len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
+
+
