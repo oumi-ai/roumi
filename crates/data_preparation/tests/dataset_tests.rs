@@ -1,7 +1,6 @@
 use data_preparation::Dataset; 
 use std::collections::HashMap; 
 use tch::{kind, Tensor};
-use tempdir::TempDir; 
 use data_preparation::SafetensorsDataset; 
 
 #[test]
@@ -83,16 +82,10 @@ fn test_datset_getitem_by_index() {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::fs; // Needed again for fs::read
     use std::io;
-    use std::mem;
-    // Removed std::path::Path
-    // Removed serde_json (no metadata parsing possible)
-
     // Import only what's needed and available without features
-    use safetensors::{SafeTensors, Dtype}; // Removed load_from_file, Metadata
-    use tempdir::TempDir; // Keep, hope warning is spurious
-    use tch::{kind, Tensor}; // Removed Kind
+    use tempfile::TempDir;
+    use tch::{kind, Tensor};
 
     // --- Helper Function (remains the same) ---
     fn setup_float_dataset(num_tensors: i64, dim_size: i64, key: &str) -> SafetensorsDataset {
@@ -110,7 +103,8 @@ mod tests {
 
     #[test]
     fn test_save_creates_file() {
-        let temp_dir = TempDir::new("create_file_test").unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        //let temp_dir = TempDir::new("create_file_test").unwrap();
         let file_path = temp_dir.path().join("output.safetensors");
         let dataset = setup_float_dataset(5, 10, "test_float");
         dataset.save_to_file(&file_path).expect("Failed to save dataset");
@@ -119,49 +113,37 @@ mod tests {
 
     #[test]
     fn test_save_and_load_verifies_data_f32() {
-        let temp_dir = TempDir::new("verify_data_f32").unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        //let temp_dir = TempDir::new("verify_data_f32").unwrap();
         let file_path = temp_dir.path().join("data_f32.safetensors");
         let num_tensors = 32i64;
         let dim_size = 128i64;
         let key = "test_float";
         let dataset = setup_float_dataset(num_tensors, dim_size, key);
         dataset.save_to_file(&file_path).expect("Failed to save dataset");
-
-        // Load using fs::read and SafeTensors::deserialize
-        let loaded_bytes = fs::read(&file_path).expect("Failed to read saved file");
-        let loaded_safetensor_obj = SafeTensors::deserialize(&loaded_bytes)
-            .expect("Failed to deserialize safetensors");
-
-        assert_eq!(loaded_safetensor_obj.len(), num_tensors as usize, "Incorrect number of tensors loaded");
-
-        for i in 0..(num_tensors as usize) {
-            let tensor_name = format!("{}.{}", key, i);
-            // Get TensorView from the SafeTensors object
-            let loaded_view = loaded_safetensor_obj.tensor(&tensor_name)
-                .expect(&format!("Tensor '{}' not found", tensor_name));
-
-            // Compare shape
-            let loaded_shape: Vec<usize> = loaded_view.shape().to_vec();
-            assert_eq!(loaded_shape, vec![1, dim_size as usize], "Shape mismatch for tensor {}", tensor_name);
-
-            // Compare dtype
-            assert_eq!(loaded_view.dtype(), Dtype::F32, "Dtype mismatch for tensor {}", tensor_name);
-
-            // Compare data
-            let loaded_data_bytes = loaded_view.data();
-            assert_eq!(
-                loaded_data_bytes.len(),
-                mem::size_of::<f32>() * (dim_size as usize),
-                "Byte length mismatch for tensor {}", tensor_name
-            );
-            let loaded_data_f32: Vec<f32> = loaded_data_bytes
-                .chunks_exact(mem::size_of::<f32>())
-                .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
-                .collect();
-            assert!(
-                loaded_data_f32.iter().all(|&x| (x - 1.0).abs() < 1e-6),
-                "Data mismatch in tensor {} - expected ones", tensor_name
-            );
+    
+        // Load the dataset using SafetensorsDataset::load_from_file
+        let loaded_dataset = SafetensorsDataset::load_from_file(&file_path)
+            .expect("Failed to load dataset");
+    
+        // Verify the loaded dataset
+        assert_eq!(loaded_dataset.len(), num_tensors as usize, "Incorrect number of tensors loaded");
+        assert_eq!(loaded_dataset.keys().len(), 1, "Incorrect number of keys in loaded dataset");
+        assert!(loaded_dataset.keys().contains(&key.to_string()), "Key '{}' not found in loaded dataset", key);
+    
+        let original_tensors = dataset.get_tensors(key).unwrap();
+        let loaded_tensors = loaded_dataset.get_tensors(key).unwrap();
+        assert_eq!(loaded_tensors.len(), original_tensors.len(), "Incorrect number of tensors under key '{}'", key);
+    
+        for (i, (orig, loaded)) in original_tensors.iter().zip(loaded_tensors.iter()).enumerate() {
+            // Verify shape
+            let orig_shape: Vec<i64> = orig.size().into_iter().collect();
+            let loaded_shape: Vec<i64> = loaded.size().into_iter().collect();
+            assert_eq!(loaded_shape, orig_shape, "Shape mismatch for tensor {} under key '{}'", i, key);
+    
+            // Verify data
+            let are_equal = orig.eq_tensor(loaded).all().int64_value(&[]) != 0;
+            assert!(are_equal, "Data mismatch for tensor {} under key '{}'", i, key);
         }
     }
 
@@ -171,7 +153,8 @@ mod tests {
         let dummy_tensor = Tensor::randn(&[10], kind::FLOAT_CPU);
         tensors_map.insert("invalid.key".to_string(), vec![dummy_tensor]);
         let dataset = SafetensorsDataset::from_dict(tensors_map);
-        let temp_dir = TempDir::new("invalid_key").unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        //let temp_dir = TempDir::new("invalid_key").unwrap();
         let file_path = temp_dir.path().join("should_not_save.safetensors");
         let result = dataset.save_to_file(&file_path);
         assert!(result.is_err(), "Saving with invalid key '.' should fail");
