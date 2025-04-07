@@ -75,6 +75,36 @@ impl SafetensorsDataset {
         &self.dataset
     }
 
+    /// Checks if the dataset contains a given key 
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.dataset.tensors.contains_key(key)
+    }
+
+    /// Access dataset by key, returning the list of tensors for that key. 
+    /// # Returns 
+    /// * `Some(&Vec<Tensor>)` if the key exists, `None` otherwise.    
+    pub fn get_by_key(&self, key: impl Into<String>) -> Option<&Vec<Tensor>> {
+        self.dataset.tensors.get(&key.into())
+    }
+
+    /// Access dataset by index, returning a row of tensors as a HashMap 
+    /// #Returns 
+    /// * `Some(HashMap(String, &Tensor>)` if the index is valid, `None` otherwise.
+    pub fn get_by_index(&self, index: usize) -> Option<HashMap<String, &Tensor>> {
+        if index >= self.len() {
+            return None; 
+        }
+        let mut row = HashMap::new(); 
+        for (key, tensors) in &self.dataset.tensors {
+            if index < tensors.len() {
+                row.insert(key.clone(), &tensors[index]);
+            } else {
+                return None; 
+            }
+        }
+        Some(row)
+    }
+
     /// Saves the dataset to a safetensors file. 
     /// 
     /// # Errors 

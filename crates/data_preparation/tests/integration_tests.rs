@@ -2,10 +2,9 @@
 use data_preparation::{DataPrepError, SafetensorsDataset}; // Use crate name
 use std::collections::HashMap;
 use tempfile::TempDir; // Using tempfile now
-use tch::{kind, Tensor}; // Import Kind if needed for type checks
+use tch::{kind, Kind, Tensor}; 
 
-// Helper function can stay here or be moved into the main crate
-// under test_utils feature if preferred. Keeping it here for now.
+// --- Helper Functions ---
 fn setup_float_dataset_for_test(num_tensors: i64, dim_size: i64, key: &str) -> SafetensorsDataset {
     let tensor_shape = [num_tensors, dim_size];
     let test_data = Tensor::ones(&tensor_shape, kind::FLOAT_CPU);
@@ -18,6 +17,36 @@ fn setup_float_dataset_for_test(num_tensors: i64, dim_size: i64, key: &str) -> S
     SafetensorsDataset::from_dict(tensors_map).expect("Setup failed")
 }
 
+fn setup_multi_key_dataset() -> (SafetensorsDataset, HashMap<String, Vec<Tensor>>) {
+    let num_rows = 3; 
+
+    // Features: Row 0=[0.], Row 1=[1.], Row 2=[2.] (shape [1, 1])
+    let features_list: Vec<Tensor> = (0..num_rows)
+        .map(|i| Tensor::f_from_slice(&[i as f32]).unwrap().reshape(&[1, 1]))
+        .collect(); 
+
+    // Labels: Row 0 = [10], Row 1 = [11], Row 2 = [12] (shape [])
+    let labels_list: Vec<Tensor> = (0..num_rows)
+        .map(|i| Tensor::from(i+10).to_kind(Kind::Int64))
+        .collect(); 
+
+    let mut tensors_map = HashMap::new(); 
+    tensors_map.insert("features".to_string(), features_list.iter().map(|t| t.shallow_clone()).collect());
+    tensors_map.insert("labels".to_string(), labels_list.iter().map(|t| t.shallow_clone()).collect());
+
+    // Use the constructor which returns Result 
+    let dataset = SafetensorsDataset::from_dict(tensors_map).expect("Setup failed");
+
+    // Return both dataset and the original tensors for easy verification 
+    let original_tensors = HashMap::from([
+        ("features".to_string(), features_list),
+        ("labels".to_string(), labels_list),
+    ]);
+
+    (dataset, original_tensors)
+}
+
+// --- Save/Load Tests ----
 #[test]
 fn test_create_and_save_safetensors_file() {
     let temp_dir = TempDir::new().unwrap();
@@ -87,6 +116,74 @@ fn test_save_invalid_key_to_safetensors_file() {
     }
 }
 
+// --- Accessor Method Tests --- 
+#[test]
+fn test_contains_key() {
+    let (dataset, _) = setup_multi_key_dataset(); 
+
+    assert!(dataset.contains_key("features"), "'features' key check failed"); 
+    assert!(dataset.contains_key("labels"), "'labels' key check failed");
+    assert!(!dataset.contains_key("unknown_key"), "'unknown_key' key check failed");
+    assert!(!dataset.contains_key(""), "Empty string key check failed"); 
+}
+
+#[test]
+fn test_get_by_key() {
+    let (dataset, original_tensors) = setup_multi_key_dataset(); 
+
+    // Test getting existing key features 
+    let features_vec_opt = dataset.get_by_key("features");
+    assert!(features_vec_opt.is_some(), "Key 'features' shoudl exist"); 
+    let features_vec = features_vec_opt.unwrap();
+    assert_eq!(features_vec.len(), 3, "Incorrect length for 'features' vector"); 
+    // Compare first tensor content 
+    assert!(features_vec[0].allclose(&original_tensors["features"][0], 1e-6, 1e-6, false), "Tensor data mismatch for features[0]");
+
+    // Test getting existing key "labels"
+    let labels_vec_opt = dataset.get_by_key("labels");
+    assert!(labels_vec_opt.is_some(), "Key 'labels' should exist");
+    let labels_vec = labels_vec_opt.unwrap();
+    assert_eq!(labels_vec.len(), 3, "Incorrect length for 'labels' vector");
+    // Compare second tensor content (eq_tensor for ints)
+    assert!(labels_vec[1].eq_tensor(&original_tensors["labels"][1]).all().int64_value(&[])==1, "Tensor data mismatch for labels[1]");
+
+    // Test getting non-existent key 
+    let unknown_vec_opt = dataset.get_by_key("unknown_key");
+    assert!(unknown_vec_opt.is_none(), "Key 'unknown_key' should not exist");
+}
+
+#[test]
+fn test_get_by_index() {
+    let (dataset, original_tensors) = setup_multi_key_dataset();
+    let num_rows = 3; 
+
+    // Test fetching first row (index 0)
+    let row0_opt = dataset.get_by_index(0);
+    assert!(row0_opt.is_some(), "Row 0 should exist");
+    let row0 = row0_opt.unwrap(); 
+    assert_eq!(row0.len(), 2, "Row 0 should have 2 keys");
+    assert!(row0.contains_key("features"), "Row 0 missing 'features'");
+    assert!(row0.contains_key("labels"), "Row 0 missing 'labels'");
+    // Compare tensor references 
+    assert!(row0["features"].allclose(&original_tensors["features"][0], 1e-6, 1e-6, false), "Row 0 features mismatch");
+    assert!(row0["labels"].eq_tensor(&original_tensors["labels"][0]).all().int64_value(&[])==1, "Row 0 labels mismatch");
+
+   // Test fetching last row (index num_rows - 1)
+   let last_index = num_rows - 1;
+   let row_last_opt = dataset.get_by_index(last_index);
+   assert!(row_last_opt.is_some(), "Last row ({}) should exist", last_index);
+   let row_last = row_last_opt.unwrap();
+   assert_eq!(row_last.len(), 2, "Last row ({}) should have 2 keys", last_index);
+   assert!(row_last["features"].allclose(&original_tensors["features"][last_index], 1e-6, 1e-6, false), "Last row features mismatch");
+   assert!(row_last["labels"].eq_tensor(&original_tensors["labels"][last_index]).all().int64_value(&[])==1, "Last row labels mismatch");
+
+    // Test fetching out-of-bounds index
+    let invalid_index = num_rows; // Index equal to length is out of bounds
+    let row_invalid_opt = dataset.get_by_index(invalid_index);
+    assert!(row_invalid_opt.is_none(), "Row at invalid index {} should be None", invalid_index);
+}
+
+// --- Constructor/Edge Case Tests ---
 #[test]
 fn test_load_missing_metadata_from_safetensors_file_fails() {
      // Need a way to create a safetensor file *without* the expected metadata
@@ -116,4 +213,3 @@ fn test_save_empty_list_to_safetensors_dataset_fails() {
 }
 
 // TODO: Add integration tests for I64, Bool types save/load.
-// TODO: Add integration tests for multiple keys.
