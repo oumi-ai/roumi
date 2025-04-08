@@ -258,6 +258,96 @@ fn test_select_indices() {
     }
 }
 
+#[test]
+fn test_filter() {
+    // Helper function to compare two tensor lists 
+    fn assert_tensor_lists_match(
+        filtered: &[Tensor],
+        original: &[Tensor],
+        expected_indices: &[usize],
+        key: &str,
+    ){
+        assert_eq!(
+            filtered.len(), expected_indices.len(), 
+            "Length mismatch for key '{}': expected {}, got {}", key, expected_indices.len(), filtered.len());
+        
+        for (i, &orig_idx) in expected_indices.iter().enumerate() {
+            if key == "features" {
+                assert!(
+                    filtered[i].allclose(&original[orig_idx], 1e-6, 1e-6, false),
+                    "Mismatch at {}[{}] (original index {})", key, i, orig_idx
+                );
+            } else {
+                assert!(
+                    filtered[i].eq_tensor(&original[orig_idx]).all().int64_value(&[]) == 1, 
+                    "Mismatch at {}[{}] (original index {}", key, i, orig_idx
+                );
+            }
+        }
+    }
+
+    // Test Case 1: Filter keeps a subset (labels > 10, keeps rows 1 and 2)
+    let (dataset, original_tensors) = setup_multi_key_dataset(); 
+    let filtered = dataset
+        .filter(|row| row.get("labels").unwrap().int64_value(&[]) > 10) 
+        .expect("Filtering dataset failed");
+    assert_eq!(filtered.len(), 2, "Filtered dataset should have length 2");
+    assert_eq!(filtered.keys().len(), 2, "Filtered dataset should have 2 keys");
+    assert_tensor_lists_match(
+        filtered.get_tensors("features").unwrap(), 
+        &original_tensors["features"], 
+        &[1, 2], 
+        "features",
+    );
+    assert_tensor_lists_match(
+        filtered.get_tensors("labels").unwrap(), 
+        &original_tensors["labels"],
+        &[1, 2],
+        "labels",
+    );
+
+    // Test Case 2: Filter keeps none (labels < 0, keeps no rows)
+    let filtered = dataset
+        .filter(|row| row.get("labels").unwrap().int64_value(&[]) < 0)
+        .expect("Filtering dataset failed");
+    assert_eq!(filtered.len(), 0, "Filtered dataset should have length 0");
+    assert_eq!(filtered.keys().len(), 2, "Filtered dataset should have 2 keys");
+    assert!(filtered.get_tensors("features").unwrap().is_empty(), "Features should be empty");
+    assert!(filtered.get_tensors("labels").unwrap().is_empty(), "Labels should be empty");
+
+    // Test Case 3: Filter keeps all (always true)
+    let filtered = dataset
+        .filter(|_| true)
+        .expect("Filtering dataset failed");
+    assert_eq!(filtered.len(), 3, "Filtered dataset should have length 3");
+    assert_eq!(filtered.keys().len(), 2, "Filtered dataset should have 2 keys");
+    assert_tensor_lists_match(
+        filtered.get_tensors("features").unwrap(), 
+        &original_tensors["features"],
+        &[0, 1, 2],
+        "features",
+    );
+    assert_tensor_lists_match(
+        filtered.get_tensors("labels").unwrap(), 
+        &original_tensors["labels"],
+        &[0, 1, 2], 
+        "labels",
+    );
+
+    // Test Case 4: Filter on empty dataset 
+    let empty_dataset = SafetensorsDataset::empty(
+        vec!["features".to_string(), 
+        "labels".to_string()]
+    );
+    let filtered = empty_dataset
+        .filter(|_| true)
+        .expect("Filtering empty dataset failed");
+    assert_eq!(filtered.len(), 0, "Filtered empty dataset should have length 0");
+    assert_eq!(filtered.keys().len(), 2, "Filtered empty dataset should have 2 keys");
+    assert!(filtered.get_tensors("features").unwrap().is_empty(), "Features should be empty");
+    assert!(filtered.get_tensors("labels").unwrap().is_empty(), "Labels should be empty");
+}
+
 // --- Constructor/Edge Case Tests ---
 #[test]
 fn test_load_missing_metadata_from_safetensors_file_fails() {

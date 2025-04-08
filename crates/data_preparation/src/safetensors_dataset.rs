@@ -60,6 +60,17 @@ impl SafetensorsDataset {
         self.dataset.is_empty()
     }
 
+    // Create an empty SafetensorsDataset with the given keys. 
+    pub fn empty(keys: Vec<String>) -> Self {
+        let mut empty_tensors = HashMap::new();
+        for key in keys {
+            empty_tensors.insert(key, Vec::new());
+        }
+        SafetensorsDataset { 
+            dataset: Dataset::new(empty_tensors) 
+        }
+    }
+
     /// Returns a set of borrowed keys in the dataset.
     pub fn keys(&self) -> HashSet<&String> {
         self.dataset.tensors.keys().collect()
@@ -109,6 +120,42 @@ impl SafetensorsDataset {
         }
         Self::from_dict(selected_tensors)
     }
+
+    /// Filters the dataset based on a predicate, returning a new dataset with only the rows that satisfy the predicate. 
+    pub fn filter<F>(&self, f: F) -> Result<Self>
+    where 
+        F: Fn(&HashMap<String, &Tensor>) -> bool,
+    {
+        // Initialize the filtered tensors map with empty vectors for each key
+        let mut filtered_tensors: HashMap<String, Vec<Tensor>> = self
+            .keys()
+            .into_iter()
+            .map(|key| (key.to_string(), Vec::new()))
+            .collect();
+
+        // Filter rows by applying the predicate and keeping only those that pass
+        for i in 0..self.len() {
+            let row = self.get_by_index(i).ok_or_else(|| {
+                DataPrepError::InconsistentTensorList(format!("Failed to access row at index {}", i))
+            })?;
+            if f(&row) {
+                for (key, tensor) in row {
+                    filtered_tensors
+                        .get_mut(key.as_str())
+                        .unwrap()
+                        .push(tensor.shallow_clone());
+                    }
+                }
+            }
+
+        // If no rows passed the predicate (or the dataset was empty), return a dataset with empty tensor lists
+        if filtered_tensors.values().all(|v| v.is_empty()) {
+            return Ok(Self {
+                dataset: Dataset::new(filtered_tensors),
+            });
+        }
+        Self::from_dict(filtered_tensors)
+    }   
 
     /// Access the inner Dataset immutably.
     pub fn inner_dataset(&self) -> &Dataset {
