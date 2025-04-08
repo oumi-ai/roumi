@@ -1,5 +1,5 @@
 // tests/integration_tests.rs
-use data_preparation::{DataPrepError, SafetensorsDataset}; // Use crate name
+use data_preparation::{DataPrepError, SafetensorsDataset, TensorLayout}; // Use crate name
 use std::collections::HashMap;
 use tempfile::TempDir; // Using tempfile now
 use tch::{kind, Kind, Tensor}; 
@@ -241,6 +241,113 @@ fn test_rename_error_duplicate_new() {
     }
 }
 
+// --- Test functions for info() ----
+#[test]
+fn test_info_standard_layout() {
+    let (dataset, _) = setup_multi_key_dataset(); 
+    let info = dataset.info(); 
+    let context = "Standard layout";
+
+    assert_eq!(info.len, 3, "[{}] Dataset length mismatch", context);
+    assert_eq!(info.layouts.len(), 2, "[{}] Layout key count mismatch", context); 
+
+    // Check "features" layout 
+    if let Some(layout) = info.layouts.get("features") {
+        if let TensorLayout::Standard {shape, dtype} = layout {
+            assert_eq!(shape, &vec![1, 1], "[{}] Features shape mismatch", context);
+            assert_eq!(*dtype, Kind::Float, "[{}] Features dtype mismatch", context);
+        } else {
+            assert!(false, "[{}] Expected Standard layout for 'features', got {:?}", context, layout);
+        }
+    } else{
+        assert!(false, "[{}] Layout for 'features' missing", context);
+    }
+
+    // Check "labels" layout 
+    if let Some(layout) = info.layouts.get("labels") {
+        if let TensorLayout::Standard {shape, dtype} = layout {
+            assert_eq!(shape, &Vec::<i64>::new(), "[{}] Labels shape mismatch", context);
+            assert_eq!(*dtype, Kind::Int64, "[{}] Labels dtype mismatch", context);
+        } else{
+            assert!(false, "[{}] Expected Standard layout for 'labels', got {:?}", context, layout);
+        }
+    } else{
+        assert!(false, "[{}] Layout for 'labels' missing", context);
+    }
+}
+
+#[test]
+fn test_info_varying_shape_layout() {
+    let context = "Varying Shape Layout";
+    // Setup dataset with varying shapes for "features"
+    let features_list: Vec<Tensor> = vec![
+        // *** FIX: Add f32 suffix to literals ***
+        Tensor::f_from_slice(&[0.0f32]).unwrap().reshape(&[1, 1]), // Shape [1, 1]
+        Tensor::f_from_slice(&[1.0f32, 2.0f32]).unwrap().reshape(&[2, 1]), // Shape [2, 1]
+        Tensor::f_from_slice(&[3.0f32]).unwrap().reshape(&[1, 1]), // Shape [1, 1]
+    ];
+    // Use standard labels (no explicit device)
+    let labels_list: Vec<Tensor> = (0..3)
+        .map(|i| Tensor::from(i + 10).to_kind(Kind::Int64))
+        .collect();
+
+    let mut tensors_map = HashMap::new();
+    tensors_map.insert("features".to_string(), features_list);
+    tensors_map.insert("labels".to_string(), labels_list);
+    let dataset = SafetensorsDataset::from_dict(tensors_map).expect("Setup failed");
+
+    // Get info
+    let info = dataset.info();
+    assert_eq!(info.len, 3, "[{}] Dataset length mismatch", context);
+    assert_eq!(info.layouts.len(), 2, "[{}] Layout key count mismatch", context);
+
+    // Check "features" layout
+    if let Some(layout) = info.layouts.get("features") {
+        // Check if it's the correct variant and extract the dtype
+        if let TensorLayout::VaryingDimSize { dtype } = layout {
+             // Assert the dtype is Float (Kind::Float)
+             assert_eq!(*dtype, Kind::Float, "[{}] Features dtype mismatch", context); // This should now pass
+        } else {
+             // Fail the test if the layout variant is not VaryingDimSize
+             assert!(false, "[{}] Expected VaryingDimSize layout for 'features', got {:?}", context, layout);
+        }
+    } else {
+         // Fail the test if the key "features" is missing
+         assert!(false, "[{}] Layout for 'features' missing", context);
+    }
+
+    // Check "labels" layout (should still be standard)
+     if let Some(layout) = info.layouts.get("labels") {
+         if let TensorLayout::Standard { shape, dtype } = layout {
+            // Check shape and dtype for labels
+            assert_eq!(shape, &Vec::<i64>::new(), "[{}] Labels shape mismatch", context); // Explicit empty Vec<i64>
+            assert_eq!(*dtype, Kind::Int64, "[{}] Labels dtype mismatch", context);
+        } else {
+            assert!(false, "[{}] Expected Standard layout for 'labels', got {:?}", context, layout);
+        }
+    } else {
+         assert!(false, "[{}] Layout for 'labels' missing", context);
+    }
+}
+
+#[test]
+fn test_info_empty_dataset() {
+    let keys = vec!["features".to_string(), "labels".to_string()];
+    let empty_dataset = SafetensorsDataset::empty(keys.clone());
+    let context = "Empty Dataset Info";
+
+    let info = empty_dataset.info();
+    assert_eq!(info.len, 0, "[{}] Empty dataset should have len 0", context);
+    assert_eq!(info.layouts.len(), keys.len(), "[{}] Layout key count mismatch", context);
+
+    // Empty lists should result in VaryingDtype according to info() implementation
+    for key in keys {
+        if let Some(layout) = info.layouts.get(&key) {
+            if let TensorLayout::VaryingDtype = layout { /* Correct */ }
+            else { assert!(false, "[{}] Expected VaryingDtype for key '{}', got {:?}", context, key, layout); }
+        } else { assert!(false, "[{}] Layout for key '{}' missing", context, key); }
+    }
+}
 
 // --- Accessor Method Tests --- 
 #[test]
@@ -728,3 +835,4 @@ fn test_save_empty_list_to_safetensors_dataset_fails() {
 }
 
 // TODO: Add integration tests for I64, Bool types save/load.
+// TODO: test_info_varying_dtype_layout: Not yet supported as we assume that our tensors have the same dtype; 

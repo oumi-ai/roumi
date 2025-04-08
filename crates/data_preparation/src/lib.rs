@@ -79,4 +79,5 @@ mod error;
 
 pub use dataset::Dataset; 
 pub use safetensors_dataset::SafetensorsDataset;
+pub use safetensors_dataset::TensorLayout;
 pub use error::{DataPrepError, Result};

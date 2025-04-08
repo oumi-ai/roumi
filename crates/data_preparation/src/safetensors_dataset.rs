@@ -346,6 +346,56 @@ impl SafetensorsDataset {
         Some(row)
     }
 
+    /// Provides metadata about the dataset's structure, including the number of rows
+    /// and the layout of tensors for each key. 
+    pub fn info(&self) -> DatasetInfo {
+        let len = self.len(); 
+        let mut layouts = HashMap::new(); 
+
+        for (key, tensors) in &self.dataset.tensors {
+            if tensors.is_empty() {
+                // For empty tensor lists, we cannot determine shape or dtype, so use VaryingDtype
+                layouts.insert(key.clone(), TensorLayout::VaryingDtype);
+                continue; 
+            }
+
+            // Get the shape and dtype of the first tensor 
+            let first_tensor = &tensors[0];
+            let first_shape = first_tensor.size(); 
+            let first_dtype = first_tensor.kind(); 
+
+            // Check if all tensors have the same shape and dtype
+            let mut all_same_shape = true;
+            let mut all_same_dtype = true;
+
+            for tensor in tensors.iter().skip(1) {
+                if tensor.kind() != first_dtype {
+                    all_same_dtype = false;  
+                }
+                if tensor.size() != first_shape {
+                    all_same_shape = false; 
+                }
+                if !all_same_dtype && !all_same_shape {
+                    break; 
+                }
+            }
+
+            // Determine the layout based on shape and dtype consistency
+            let layout = if !all_same_dtype {
+                TensorLayout::VaryingDtype
+            } else if !all_same_shape {
+                TensorLayout::VaryingDimSize {dtype: first_dtype}
+            } else {
+                TensorLayout::Standard {
+                    shape: first_shape, 
+                    dtype: first_dtype,
+                }
+            }; 
+            layouts.insert(key.clone(), layout);
+        }
+        DatasetInfo{len, layouts}
+    }
+
     /// Saves the dataset to a safetensors file. 
     /// 
     /// # Errors 
@@ -609,4 +659,29 @@ impl SafetensorsDataset {
         })
     }  
      
+}
+
+/// Describes the layout of tensors for a key in the dataset.
+#[derive(Debug, PartialEq)]
+pub enum TensorLayout {
+    // All tensors have the same shape and dtype. 
+    Standard {
+        shape: Vec<i64>, 
+        dtype: Kind,
+    },
+    // Tensors have varying shapes but the same dtype 
+    VaryingDimSize {
+        dtype: Kind, 
+    },
+    // Tensors have varying dtypes (and possibly varying shapes).
+    VaryingDtype, 
+}
+
+/// Metadata about the dataset's structure 
+#[derive(Debug, PartialEq)]
+pub struct DatasetInfo{
+    // The number of rows in the dataset. 
+    pub len: usize, 
+    // A mapping of keys to their tensor layouts. 
+    pub layouts: HashMap<String, TensorLayout>, 
 }
