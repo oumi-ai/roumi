@@ -58,40 +58,246 @@ fn test_create_and_save_safetensors_file() {
     assert!(file_path.exists(), "Safetensors file was not created");
 }
 
-#[test]
-fn test_load_safetensors_file_and_verify_f32_data() {
-    let temp_dir = TempDir::new().unwrap();
-    let file_path = temp_dir.path().join("data_f32.safetensors");
-    let num_tensors = 32i64;
-    let dim_size = 128i64;
-    let key = "test_float";
-    let dataset = setup_float_dataset_for_test(num_tensors, dim_size, key);
-
-    // Save
-    dataset.save_to_file(&file_path).expect("Failed to save dataset");
-
-    // Load using the struct's method
-    let loaded_dataset = SafetensorsDataset::load_from_file(&file_path)
-        .expect("Failed to load dataset");
-
-    // Verify
-    assert_eq!(loaded_dataset.len(), num_tensors as usize, "Incorrect numel loaded");
-    assert_eq!(loaded_dataset.keys().len(), 1, "Incorrect number of keys");
-    assert!(loaded_dataset.keys().contains(&key.to_string()), "Key missing");
-
-    // Use the public getter method
-    let original_tensors = dataset.get_tensors(key).unwrap();
-    let loaded_tensors = loaded_dataset.get_tensors(key).unwrap();
-    assert_eq!(loaded_tensors.len(), original_tensors.len(), "Tensor list length mismatch");
-
-    for (i, (orig, loaded)) in original_tensors.iter().zip(loaded_tensors.iter()).enumerate() {
-        assert_eq!(loaded.size(), orig.size(), "Shape mismatch for tensor {}", i);
-        assert_eq!(loaded.kind(), orig.kind(), "Kind mismatch for tensor {}", i);
-        // Use allclose for float comparison
-        assert!(orig.allclose(loaded, 1e-6, 1e-6, false), "Data mismatch for tensor {}", i);
-        // Also verify it's ones
-        assert!(loaded.eq(1.0).all().int64_value(&[]) == 1, "Tensor {} not ones", i)
+// --- Tests for Various Dtypes ---
+// --- Helper Function ---
+fn setup_typed_dataset<T>(
+    num_tensors: i64,
+    dims: &[i64],
+    key: &str,
+    values: &[T],
+    kind: Kind,
+) -> (SafetensorsDataset, HashMap<String, Vec<Tensor>>) 
+where
+    T: tch::kind::Element + Copy,
+{
+    assert_eq!(values.len() as i64, num_tensors * dims.iter().product::<i64>(), "Incorrect number of values provided for shape");
+    
+    // 1. Create the original list of tensors
+    let original_tensor_list: Vec<Tensor> = values.chunks(dims.iter().product::<i64>() as usize)
+        .map(|chunk| Tensor::from_slice(chunk).to_kind(kind).reshape(dims)) // Assuming default device is okay now
+        .collect();
+    assert_eq!(original_tensor_list.len(), num_tensors as usize);
+    
+    // 2. Create the map to return for test verification purposes.
+    let mut verification_tensors_map = HashMap::new();
+    verification_tensors_map.insert(
+        key.to_string(),
+        original_tensor_list.iter().map(|t| t.shallow_clone()).collect()
+    );
+    
+    // 3. Create the map that will be PASSED TO and OWNED BY from_dict.
+    let mut dataset_tensors_map = HashMap::new();
+    // Move the original_tensor_list into this map
+    dataset_tensors_map.insert(key.to_string(), original_tensor_list);
+    
+    // 4. Create the dataset by PASSING OWNERSHIP of dataset_tensors_map. 
+    let dataset = SafetensorsDataset::from_dict(dataset_tensors_map)
+        .expect("Setup failed");
+    
+    // 5. Return the created dataset and the map containing shallow clones for verification
+    (dataset, verification_tensors_map)
     }
+
+
+#[test]
+fn test_load_safetensors_file_and_verify_i64_data() {
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("data_i64.safetensors");
+    let num_tensors = 10i64;
+    let dims = [4i64, 2i64];
+    let key = "test_i64";
+    let values: Vec<i64> = (0..(num_tensors * dims.iter().product::<i64>())).map(|i| i * 10).collect();
+
+    // setup 
+    let (dataset, original_tensors_map) = setup_typed_dataset(
+        num_tensors, &dims, key, &values, Kind::Int64
+    );
+
+    dataset.save_to_file(&file_path).expect("Failed to save I64 dataset");
+    let loaded_dataset = SafetensorsDataset::load_from_file(&file_path)
+        .expect("Failed to load I64 dataset");
+
+    // Verify basics
+    assert_eq!(loaded_dataset.len(), num_tensors as usize);
+    assert!(loaded_dataset.contains_key(key));
+
+    let loaded_tensors_vec = loaded_dataset.get_tensors(key).unwrap();
+    let original_tensors_vec = original_tensors_map.get(key).expect("Original key missing");
+    assert_eq!(loaded_tensors_vec.len(), original_tensors_vec.len());
+    for (i, (orig_tensor, loaded_tensor)) in original_tensors_vec.iter().zip(loaded_tensors_vec.iter()).enumerate() {
+        assert_eq!(loaded_tensor.size(), orig_tensor.size(), "I64 Shape mismatch tensor {}", i);
+        assert_eq!(loaded_tensor.kind(), Kind::Int64, "I64 Kind mismatch tensor {}", i);
+        assert!(orig_tensor.eq_tensor(loaded_tensor).all().int64_value(&[]) == 1, "I64 Data mismatch tensor {}", i);
+    }
+}
+
+#[test]
+fn test_load_safetensors_file_and_verify_bool_data() {
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("data_bool.safetensors");
+    let num_tensors = 5i64;
+    let dims = [10i64]; // Shape [10]
+    let key = "test_bool";
+    let context = "Bool Save/Load";
+
+    // 1. Create original boolean data and tensors directly
+    let values: Vec<bool> = (0..(num_tensors * dims.iter().product::<i64>()))
+        .map(|i| i % 2 == 0) // Alternating true/false
+        .collect();
+    let chunk_size = dims.iter().product::<i64>() as usize;
+
+    let original_tensors_list: Vec<Tensor> = values.chunks(chunk_size)
+        .map(|chunk| Tensor::from_slice(chunk).reshape(dims))
+        .collect();
+    assert_eq!(original_tensors_list[0].kind(), Kind::Bool);
+
+    let mut tensors_map = HashMap::new();
+    tensors_map.insert(key.to_string(), original_tensors_list.iter().map(|t| t.shallow_clone()).collect());
+    let dataset_to_save = SafetensorsDataset::from_dict(tensors_map).expect(&format!("[{}] Setup failed", context));
+
+    dataset_to_save.save_to_file(&file_path).expect(&format!("[{}] Failed to save Bool dataset", context));
+
+    let loaded_dataset = SafetensorsDataset::load_from_file(&file_path)
+        .expect(&format!("[{}] Failed to load Bool dataset", context));
+
+    // 5. Verify 
+    assert_eq!(loaded_dataset.len(), num_tensors as usize, "[{}] Length mismatch", context);
+    assert!(loaded_dataset.contains_key(key), "[{}] Key missing", context);
+    let loaded_tensors_vec = loaded_dataset.get_tensors(key).unwrap();
+    assert_eq!(loaded_tensors_vec.len(), original_tensors_list.len(), "[{}] List length mismatch", context);
+
+    // Compare each tensor
+    for (i, (orig_tensor, loaded_tensor)) in original_tensors_list.iter().zip(loaded_tensors_vec.iter()).enumerate() {
+        let test_ctx = format!("[{} Tensor {}]", context, i);
+        assert_eq!(loaded_tensor.size(), orig_tensor.size(), "{} Shape mismatch", test_ctx);
+        assert_eq!(loaded_tensor.kind(), Kind::Bool, "{} Kind mismatch", test_ctx); // Check Kind
+        // Use eq_tensor for exact comparison
+        assert!(orig_tensor.eq_tensor(loaded_tensor).all().int64_value(&[]) == 1, "{} Data mismatch", test_ctx);
+    }
+}
+
+#[test]
+fn test_load_safetensors_file_and_verify_f64_data() { // Double
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("data_f64.safetensors");
+    let num_tensors = 8i64;
+    let dims = [3i64];
+    let key = "test_f64";
+    let values: Vec<f64> = (0..(num_tensors * dims.iter().product::<i64>())).map(|i| i as f64 * 1.1).collect();
+
+    let (dataset, original_tensors_map) = setup_typed_dataset( 
+        num_tensors, &dims, key, &values, Kind::Double
+    );
+
+    dataset.save_to_file(&file_path).expect("Failed to save F64 dataset");
+    let loaded_dataset = SafetensorsDataset::load_from_file(&file_path)
+        .expect("Failed to load F64 dataset");
+
+    // Verify basics
+    assert_eq!(loaded_dataset.len(), num_tensors as usize);
+    assert!(loaded_dataset.contains_key(key));
+
+    let loaded_tensors_vec = loaded_dataset.get_tensors(key).unwrap();
+    let original_tensors_vec = original_tensors_map.get(key).expect("Original key missing");
+    assert_eq!(loaded_tensors_vec.len(), original_tensors_vec.len());
+    for (i, (orig_tensor, loaded_tensor)) in original_tensors_vec.iter().zip(loaded_tensors_vec.iter()).enumerate() {
+        assert_eq!(loaded_tensor.size(), orig_tensor.size(), "F64 Shape mismatch tensor {}", i);
+        assert_eq!(loaded_tensor.kind(), Kind::Double, "F64 Kind mismatch tensor {}", i);
+        assert!(orig_tensor.allclose(loaded_tensor, 1e-6, 1e-6, false), "F64 Data mismatch tensor {}", i);
+    }
+}
+
+#[test]
+fn test_load_safetensors_file_and_verify_i32_data() { // Int
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("data_i32.safetensors");
+    let num_tensors = 12i64;
+    let dims = [2i64, 2i64];
+    let key = "test_i32";
+    let values: Vec<i32> = (0..(num_tensors * dims.iter().product::<i64>())).map(|i| (i as i32) - 10).collect();
+
+    let (dataset, original_tensors_map) = setup_typed_dataset( 
+        num_tensors, &dims, key, &values, Kind::Int
+    );
+
+    dataset.save_to_file(&file_path).expect("Failed to save I32 dataset");
+    let loaded_dataset = SafetensorsDataset::load_from_file(&file_path)
+        .expect("Failed to load I32 dataset");
+
+    // Verify basics
+    assert_eq!(loaded_dataset.len(), num_tensors as usize);
+    assert!(loaded_dataset.contains_key(key));
+
+    let loaded_tensors_vec = loaded_dataset.get_tensors(key).unwrap();
+    let original_tensors_vec = original_tensors_map.get(key).expect("Original key missing");
+    assert_eq!(loaded_tensors_vec.len(), original_tensors_vec.len());
+    for (i, (orig_tensor, loaded_tensor)) in original_tensors_vec.iter().zip(loaded_tensors_vec.iter()).enumerate() {
+         assert_eq!(loaded_tensor.size(), orig_tensor.size(), "I32 Shape mismatch tensor {}", i);
+         assert_eq!(loaded_tensor.kind(), Kind::Int, "I32 Kind mismatch tensor {}", i);
+         assert!(orig_tensor.eq_tensor(loaded_tensor).all().int64_value(&[]) == 1, "I32 Data mismatch tensor {}", i);
+     }
+}
+
+#[test]
+fn test_load_safetensors_file_and_verify_u8_data() { // Uint8
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("data_u8.safetensors");
+    let num_tensors = 6i64;
+    let dims = [5i64];
+    let key = "test_u8";
+    let values: Vec<u8> = (0..(num_tensors * dims.iter().product::<i64>()) as u8).collect();
+
+    let (dataset, original_tensors_map) = setup_typed_dataset( 
+        num_tensors, &dims, key, &values, Kind::Uint8
+    );
+
+    dataset.save_to_file(&file_path).expect("Failed to save U8 dataset");
+    let loaded_dataset = SafetensorsDataset::load_from_file(&file_path)
+        .expect("Failed to load U8 dataset");
+
+    // Verify basics
+     assert_eq!(loaded_dataset.len(), num_tensors as usize);
+     assert!(loaded_dataset.contains_key(key));
+
+    let loaded_tensors_vec = loaded_dataset.get_tensors(key).unwrap();
+    let original_tensors_vec = original_tensors_map.get(key).expect("Original key missing");
+     assert_eq!(loaded_tensors_vec.len(), original_tensors_vec.len());
+      for (i, (orig_tensor, loaded_tensor)) in original_tensors_vec.iter().zip(loaded_tensors_vec.iter()).enumerate() {
+         assert_eq!(loaded_tensor.size(), orig_tensor.size(), "U8 Shape mismatch tensor {}", i);
+         assert_eq!(loaded_tensor.kind(), Kind::Uint8, "U8 Kind mismatch tensor {}", i);
+         assert!(orig_tensor.eq_tensor(loaded_tensor).all().int64_value(&[]) == 1, "U8 Data mismatch tensor {}", i);
+     }
+}
+
+#[test]
+fn test_load_safetensors_file_and_verify_i8_data() { // Int8
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("data_i8.safetensors");
+    let num_tensors = 4i64;
+    let dims = [2i64];
+    let key = "test_i8";
+    let values: Vec<i8> = (0..(num_tensors * dims.iter().product::<i64>()) as i8).map(|i| i - 3).collect();
+
+    let (dataset, original_tensors_map) = setup_typed_dataset( 
+        num_tensors, &dims, key, &values, Kind::Int8
+    );
+
+    dataset.save_to_file(&file_path).expect("Failed to save I8 dataset");
+    let loaded_dataset = SafetensorsDataset::load_from_file(&file_path)
+        .expect("Failed to load I8 dataset");
+
+    // Verify basics
+    assert_eq!(loaded_dataset.len(), num_tensors as usize);
+    assert!(loaded_dataset.contains_key(key));
+
+    let loaded_tensors_vec = loaded_dataset.get_tensors(key).unwrap();
+    let original_tensors_vec = original_tensors_map.get(key).expect("Original key missing");
+     assert_eq!(loaded_tensors_vec.len(), original_tensors_vec.len());
+      for (i, (orig_tensor, loaded_tensor)) in original_tensors_vec.iter().zip(loaded_tensors_vec.iter()).enumerate() {
+         assert_eq!(loaded_tensor.size(), orig_tensor.size(), "I8 Shape mismatch tensor {}", i);
+         assert_eq!(loaded_tensor.kind(), Kind::Int8, "I8 Kind mismatch tensor {}", i);
+         assert!(orig_tensor.eq_tensor(loaded_tensor).all().int64_value(&[]) == 1, "I8 Data mismatch tensor {}", i);
+     }
 }
 
 #[test]

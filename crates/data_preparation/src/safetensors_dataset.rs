@@ -9,7 +9,10 @@ use std::convert::TryInto;
 use std::fs::File;
 use std::io::{Read, Write}; // Required traits
 use std::path::Path;
+use std::mem; 
 use tch::{Kind, Tensor};
+
+
 
 /// A wrapper around `Dataset` providing methods to save/load 
 /// using the safetensors format 
@@ -427,16 +430,20 @@ impl SafetensorsDataset {
 
             // Determine list dtype 
             let list_kind = tensor_list[0].kind(); 
-            let list_safetensor_dtype = match list_kind {
-                Kind::Float => Dtype::F32, 
-                Kind::Int64 => Dtype::I64,
-                Kind::Bool => Dtype::BOOL, 
-                // TODO: Add other supported types here 
+            let (list_safetensor_dtype, list_dtype_str) = match list_kind {
+                Kind::Float => (Dtype::F32, "F32"), 
+                Kind::Double => (Dtype::F64, "F64"),
+                Kind::Int64 => (Dtype::I64, "I64"),
+                Kind::Int => (Dtype::I32, "I32"), 
+                Kind::Int8 => (Dtype::I8, "I8"),
+                Kind::Uint8 => (Dtype::U8, "U8"),
+                Kind::Bool => (Dtype::BOOL, "BOOL"),
+                // TODO: Add F16, and BF16 here 
                 _ => return Err(DataPrepError::UnsupportedDtype(format!(
                     "Dtype {:?} in list for key '{}' is not supported for saving.",  list_kind, key
                 )))
             };
-            let list_dtype_str = format!("{:?}", list_safetensor_dtype); 
+            let list_dtype_str_owned = list_dtype_str.to_string(); 
 
             // Process individual tensors 
             for (i, tensor) in tensor_list.iter().enumerate() {
@@ -452,34 +459,55 @@ impl SafetensorsDataset {
                 let num_elements = tensor.numel(); 
                 let shape: Vec<usize> = tensor.size().iter().map(|&x| x as usize).collect(); 
 
-                let (dtype_enum, bytes) = match list_kind {
+                let bytes: Vec<u8> = match list_kind {
                     Kind::Float => {
                         let mut data = vec![0.0f32; num_elements];
                         tensor.copy_data(&mut data, num_elements);
-                        (Dtype::F32, data.into_iter().flat_map(|x|x.to_le_bytes()).collect())
+                        data.into_iter().flat_map(|x|x.to_le_bytes()).collect()
+                    }
+                    Kind::Double => {
+                        let mut data = vec![0.0f64; num_elements];
+                        tensor.copy_data(&mut data, num_elements);
+                        data.into_iter().flat_map(|x| x.to_le_bytes()).collect()
                     }
                     Kind::Int64 => {
                         let mut data = vec![0i64; num_elements];
                         tensor.copy_data(&mut data, num_elements);
-                        (Dtype::I64, data.into_iter().flat_map(|x|x.to_le_bytes()).collect())
+                        data.into_iter().flat_map(|x|x.to_le_bytes()).collect()
+                    }
+                    Kind::Int => {
+                        let mut data = vec![0i32; num_elements];
+                        tensor.copy_data(&mut data, num_elements);
+                        data.into_iter().flat_map(|x| x.to_le_bytes()).collect()
+                    }
+                    Kind::Int8 => {
+                        let mut data = vec![0i8; num_elements];
+                        tensor.copy_data(&mut data, num_elements);
+                        data.into_iter().flat_map(|x| x.to_le_bytes()).collect()
+                    }
+                    Kind::Uint8 => {
+                        let mut data = vec![0u8; num_elements];
+                        tensor.copy_data(&mut data, num_elements);
+                        data
                     }
                     Kind::Bool => {
-                        let mut data = vec![0u8; num_elements]; 
-                        tensor.copy_data(&mut data, num_elements);
-                        (Dtype::BOOL, data)
+                        let mut bool_data = vec![false; num_elements];
+                        tensor.copy_data::<bool>(&mut bool_data, num_elements);
+                        let byte_data: Vec<u8> = bool_data.into_iter().map(|b| b as u8).collect();
+                        byte_data
                     }
                     // This case is most likely unreachable due to the dtype check before the loop 
                     _ => unreachable!("Unsupported dtype checked earlier"),
                 };
 
-                tensor_data_map.insert(tensor_key.clone(), (dtype_enum, shape, bytes));
+                tensor_data_map.insert(tensor_key.clone(), (list_safetensor_dtype, shape, bytes));
             }
 
             // Constuct list metadata correctly 
             let tensor_meta_map: HashMap<&str, Value> = HashMap::from([
                 ("list", Value::Bool(true)),
                 ("numel", Value::Number(tensor_list.len().into())),
-                ("dtype", Value::String(list_dtype_str)),
+                ("dtype", Value::String(list_dtype_str_owned)),
             ]);
             metadata.insert(key.clone(), serde_json::to_string(&tensor_meta_map)?);
         
@@ -535,8 +563,8 @@ impl SafetensorsDataset {
 
        // Extract __metadata__ section
        let top_level_metadata = header
-       .get("__metadata__")
-       .ok_or_else(|| DataPrepError::MetadataNotFound("__metadata__ section missing".into()))?;
+            .get("__metadata__")
+            .ok_or_else(|| DataPrepError::MetadataNotFound("__metadata__ section missing".into()))?;
         // Ensure __metadata__ is an object/map
         let top_level_metadata_map: HashMap<String, Value> = serde_json::from_value(top_level_metadata.clone())?; 
 
@@ -610,7 +638,7 @@ impl SafetensorsDataset {
 
                 // Check TensorView dtype matches metadata (optional but good)
                 let view_dtype_str = format!("{:?}", tensor_view.dtype());
-                 if view_dtype_str != dtype_str {
+                if view_dtype_str != dtype_str {
                       return Err(DataPrepError::FileFormat(format!(
                          "Metadata dtype ('{}') mismatches TensorView dtype ('{}') for tensor '{}'",
                          dtype_str, view_dtype_str, tensor_key
@@ -620,28 +648,62 @@ impl SafetensorsDataset {
                 // Reconstruct tch::Tensor
                 let tensor = match dtype_str {
                     "F32" => {
-                        let data: Vec<f32> = tensor_view.data()
-                            .chunks_exact(4)
-                            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap())) // Consider error handling for try_into
-                            .collect();
-                         Tensor::from_slice(&data)
+                        let data_bytes = tensor_view.data();
+                        let expected_bytes = tensor_view.shape().iter().product::<usize>() * mem::size_of::<f32>();
+                        if data_bytes.len() != expected_bytes { return Err(DataPrepError::FileFormat(format!("Incorrect byte length for F32 tensor '{}'", tensor_key))); }
+                        let data: Vec<f32> = data_bytes.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+                        Tensor::from_slice(&data).reshape(&tensor_view.shape().iter().map(|&d| d as i64).collect::<Vec<_>>())
+                    }
+                    "F64" => { // Kind::Double
+                        let data_bytes = tensor_view.data();
+                        let expected_bytes = tensor_view.shape().iter().product::<usize>() * mem::size_of::<f64>();
+                        if data_bytes.len() != expected_bytes { return Err(DataPrepError::FileFormat(format!("Incorrect byte length for F64 tensor '{}'", tensor_key))); }
+                        let data: Vec<f64> = data_bytes.chunks_exact(8).map(|c| f64::from_le_bytes(c.try_into().unwrap())).collect();
+                        Tensor::from_slice(&data) // from_slice on f64 creates Kind::Double
+                           .reshape(&tensor_view.shape().iter().map(|&d| d as i64).collect::<Vec<_>>())
+                    }
+                    "I8" => { // Kind::Int8
+                        let data_bytes = tensor_view.data();
+                        let expected_bytes = tensor_view.shape().iter().product::<usize>() * mem::size_of::<i8>();
+                         if data_bytes.len() != expected_bytes { return Err(DataPrepError::FileFormat(format!("Incorrect byte length for I8 tensor '{}'", tensor_key))); }
+                        // Convert u8 bytes back to i8
+                        let data: Vec<i8> = data_bytes.iter().map(|&byte| byte as i8).collect();
+                        Tensor::from_slice(&data) // from_slice on i8 creates Kind::Int8
                             .reshape(&tensor_view.shape().iter().map(|&d| d as i64).collect::<Vec<_>>())
                     }
-                     "I64" => {
-                        let data: Vec<i64> = tensor_view.data()
-                            .chunks_exact(8)
-                            .map(|chunk| i64::from_le_bytes(chunk.try_into().unwrap()))
-                            .collect();
-                         Tensor::from_slice(&data)
+                    "I32" => { // Kind::Int
+                        let data_bytes = tensor_view.data();
+                        let expected_bytes = tensor_view.shape().iter().product::<usize>() * mem::size_of::<i32>();
+                        if data_bytes.len() != expected_bytes { return Err(DataPrepError::FileFormat(format!("Incorrect byte length for I32 tensor '{}'", tensor_key))); }
+                        let data: Vec<i32> = data_bytes.chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect();
+                        Tensor::from_slice(&data) // from_slice on i32 creates Kind::Int
                             .reshape(&tensor_view.shape().iter().map(|&d| d as i64).collect::<Vec<_>>())
                     }
-                     "BOOL" => {
-                        let data: Vec<u8> = tensor_view.data().to_vec(); // Assume BOOL is u8
-                         Tensor::from_slice(&data)
+                    "I64" => {
+                        let data_bytes = tensor_view.data();
+                        let expected_bytes = tensor_view.shape().iter().product::<usize>() * mem::size_of::<i64>();
+                        if data_bytes.len() != expected_bytes { return Err(DataPrepError::FileFormat(format!("Incorrect byte length for I64 tensor '{}'", tensor_key))); }
+                        let data: Vec<i64> = data_bytes.chunks_exact(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect();
+                        Tensor::from_slice(&data).reshape(&tensor_view.shape().iter().map(|&d| d as i64).collect::<Vec<_>>())
+                    }
+                    "U8" => { // Kind::Uint8
+                        let data_bytes = tensor_view.data();
+                        let expected_bytes = tensor_view.shape().iter().product::<usize>() * mem::size_of::<u8>();
+                        if data_bytes.len() != expected_bytes { return Err(DataPrepError::FileFormat(format!("Incorrect byte length for U8 tensor '{}'", tensor_key))); }
+                        let data: Vec<u8> = data_bytes.to_vec(); // Already u8 bytes
+                        Tensor::from_slice(&data) // from_slice on u8 creates Kind::Uint8
+                            .reshape(&tensor_view.shape().iter().map(|&d| d as i64).collect::<Vec<_>>())
+                    }
+                    "BOOL" => {
+                        let data_bytes = tensor_view.data();
+                        let expected_bytes = tensor_view.shape().iter().product::<usize>() * mem::size_of::<u8>();
+                        if data_bytes.len() != expected_bytes { return Err(DataPrepError::FileFormat(format!("Incorrect byte length for BOOL tensor '{}'", tensor_key))); }
+                        let data: Vec<u8> = data_bytes.to_vec();
+                        Tensor::from_slice(&data)
                              .reshape(&tensor_view.shape().iter().map(|&d| d as i64).collect::<Vec<_>>())
                              .to_kind(Kind::Bool) // Explicitly convert to Bool kind
                     }
-                    // TODO: Add other types here if supported by save_to_file
+                    // NOTE: F16 and BF16 would require handling u16 bits -> half::f16/bf16 -> Tensor construction
                     unsupported_dtype => {
                         return Err(DataPrepError::UnsupportedDtype(format!(
                              "Dtype '{}' specified in metadata for tensor '{}' is not supported for loading.",
