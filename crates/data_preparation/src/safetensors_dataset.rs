@@ -157,6 +157,82 @@ impl SafetensorsDataset {
         Self::from_dict(filtered_tensors)
     }   
 
+    /// Applies a transformation function to each row of the dataset, returning a new dataset 
+    pub fn map<F>(&self, f: F) -> Result<Self>
+    where
+        F: Fn(usize, &HashMap<String, &Tensor>) -> HashMap<String, Tensor>,
+    {
+        let len = self.len();
+
+        // Handle empty dataset case
+        if len == 0 {
+            let mut empty_tensors = HashMap::new();
+            for key in self.keys() {
+                empty_tensors.insert(key.to_string(), Vec::new());
+            }
+            return Ok(Self {
+                dataset: Dataset::new(empty_tensors),
+            });
+        }
+
+        let mut transformed_tensors: HashMap<String, Vec<Tensor>> = HashMap::new();
+        let len = self.len();
+
+        // Initialize the transformed tensors map with empty vectors for each key
+        for key in self.keys() {
+            transformed_tensors.insert(key.to_string(), Vec::with_capacity(len));
+        }
+
+        // Apply the transformation function to each row
+        for i in 0..len {
+            let row = self.get_by_index(i).ok_or_else(|| {
+                DataPrepError::InconsistentTensorList(format!("Failed to access row at index {}", i))
+            })?;
+            let transformed_row = f(i, &row);
+
+            // Validate the transformed row
+            if transformed_row.len() != row.len() {
+                return Err(DataPrepError::InvalidKey(format!(
+                    "Transformation at index {} produced a row with {} keys, expected {}",
+                    i,
+                    transformed_row.len(),
+                    row.len()
+                )));
+            }
+
+            // Add the transformed tensors to the corresponding lists
+            for (key, tensor) in transformed_row {
+                if !self.contains_key(&key) {
+                    return Err(DataPrepError::InvalidKey(format!(
+                        "Transformation at index {} produced an invalid key '{}'",
+                        i, key
+                    )));
+                }
+                // Validate dtype consistency
+                let existing_tensors = transformed_tensors.get_mut(&key).unwrap();
+                if !existing_tensors.is_empty() && tensor.kind() != existing_tensors[0].kind() {
+                    return Err(DataPrepError::InconsistentTensorList(format!(
+                        "Transformation at index {} produced a tensor with dtype {:?} for key '{}', expected dtype {:?}", 
+                        i, tensor.kind(), key, existing_tensors[0].kind()
+                    )));
+                }
+                existing_tensors.push(tensor);
+            }
+        }
+
+        // Validate lengths
+        for (key, tensors) in &transformed_tensors {
+            if tensors.len() != len {
+                return Err(DataPrepError::InconsistentTensorList(format!(
+                    "Transformation produced {} tensors for key '{}', expected {}", 
+                    tensors.len(), key, len
+                )));
+            }
+        }
+
+        Self::from_dict(transformed_tensors)
+    }
+
     /// Access the inner Dataset immutably.
     pub fn inner_dataset(&self) -> &Dataset {
         &self.dataset

@@ -259,6 +259,152 @@ fn test_select_indices() {
 }
 
 #[test]
+fn test_map() {
+    // Helper function to compare tensor values against expected values
+    fn assert_tensor_values(
+        tensors: &[Tensor],
+        expected_values: &[f64],
+        key: &str,
+        kind: Kind,
+    ) 
+    {
+        assert_eq!(
+            tensors.len(),
+            expected_values.len(),
+            "Length mismatch for key '{}': expected {}, got {}",
+            key,
+            expected_values.len(),
+            tensors.len()
+        );
+        for (i, (&value, tensor)) in expected_values.iter().zip(tensors.iter()).enumerate() {
+            assert_eq!(
+                tensor.kind(),
+                kind,
+                "Dtype mismatch for key '{}'[{}]: expected {:?}, got {:?}",
+                key,
+                i,
+                kind,
+                tensor.kind()
+            );
+            let tensor_value = if tensor.size().is_empty() {
+                tensor.double_value(&[])
+            } else {
+                tensor.double_value(&[0, 0])
+            };
+            assert!(
+                (tensor_value - value).abs() < 1e-6,
+                "Value mismatch for key '{}'[{}]: expected {}, got {}",
+                key,
+                i,
+                value,
+                tensor_value
+            );
+        }
+    }
+
+    // Test Case 1: Map transforms values (add 10 to features, add 0.5 to labels and cast to float)
+    let (dataset, _) = setup_multi_key_dataset(); // Original: features=[[0.]],[[1.]],[[2.]]; labels=10, 11, 12
+    let mapped = dataset
+        .map(|_i, row| {
+            let mut new_row = HashMap::new();
+            let features = *row.get("features").unwrap();
+            new_row.insert("features".to_string(), features + 10.0f64);
+            let labels = *row.get("labels").unwrap();
+            let new_labels = labels.to_kind(Kind::Float) + 0.5f64;
+            new_row.insert("labels".to_string(), new_labels);
+            new_row
+        })
+        .expect("Mapping dataset failed");
+    assert_eq!(mapped.len(), 3, "Mapped dataset should have length 3");
+    assert_eq!(mapped.keys().len(), 2, "Mapped dataset should have 2 keys");
+    assert_tensor_values(
+        mapped.get_tensors("features").unwrap(),
+        &[10.0, 11.0, 12.0],
+        "features",
+        Kind::Float,
+    );
+    assert_tensor_values(
+        mapped.get_tensors("labels").unwrap(),
+        &[10.5, 11.5, 12.5],
+        "labels",
+        Kind::Float,
+    );
+
+    // Test Case 2: Map fails on inconsistent keys (removes "labels" for second row)
+    let (dataset, _) = setup_multi_key_dataset();
+    let mapped_res = dataset.map(|i, row| {
+        let mut new_row = HashMap::new();
+        let features = *row.get("features").unwrap();
+        new_row.insert("features".to_string(), features.shallow_clone());
+        if i != 1 { // Second row has index 1 (0-based)
+            let labels = *row.get("labels").unwrap();
+            new_row.insert("labels".to_string(), labels.shallow_clone());
+        }
+        new_row
+    });
+    assert!(mapped_res.is_err(), "Map should fail with inconsistent keys");
+    match mapped_res.err().unwrap() {
+        DataPrepError::InvalidKey(msg) => {
+            assert!(
+                msg.contains("produced a row with 1 keys, expected 2"),
+                "Expected error message about inconsistent keys, got '{}'",
+                msg
+            );
+        }
+        e => assert!(
+            false,
+            "Expected DataPrepError::InvalidKey, got {:?}", e
+        ),
+    }
+
+    // Test Case 3: Map fails on inconsistent dtype (changes features dtype for second row)
+    let (dataset, _) = setup_multi_key_dataset();
+    let mapped_res = dataset.map(|i, row| {
+        let mut new_row = HashMap::new();
+        let features = *row.get("features").unwrap();
+        if i == 1 { // Second row has index 1 (0-based)
+            new_row.insert("features".to_string(), features.to_kind(Kind::Int64));
+        } else {
+            new_row.insert("features".to_string(), features.shallow_clone());
+        }
+        let labels = *row.get("labels").unwrap();
+        new_row.insert("labels".to_string(), labels.shallow_clone());
+        new_row
+    });
+    assert!(mapped_res.is_err(), "Map should fail with inconsistent dtypes");
+    match mapped_res.err().unwrap() {
+        DataPrepError::InconsistentTensorList(msg) => {
+            assert!(
+                msg.contains("produced a tensor with dtype Int64 for key 'features', expected dtype Float"),
+                "Expected error message about dtype mismatch, got '{}'",
+                msg
+            );
+        }
+        e => assert!(
+            false,
+            "Expected DataPrepError::InconsistentTensorList, got {:?}", e
+        ),
+    }
+
+    // Test Case 4: Map on empty dataset
+    let empty_dataset = SafetensorsDataset::empty(vec!["features".to_string(), "labels".to_string()]);
+    let mapped = empty_dataset
+        .map(|_i, row| {
+            let mut new_row = HashMap::new();
+            let features = *row.get("features").unwrap();
+            new_row.insert("features".to_string(), features + 1.0f64);
+            let labels = *row.get("labels").unwrap();
+            new_row.insert("labels".to_string(), labels.shallow_clone());
+            new_row
+        })
+        .expect("Mapping empty dataset failed");
+    assert_eq!(mapped.len(), 0, "Mapped empty dataset should have length 0");
+    assert_eq!(mapped.keys().len(), 2, "Mapped empty dataset should have 2 keys");
+    assert!(mapped.get_tensors("features").unwrap().is_empty(), "Features should be empty");
+    assert!(mapped.get_tensors("labels").unwrap().is_empty(), "Labels should be empty");
+}
+
+#[test]
 fn test_filter() {
     // Helper function to compare two tensor lists 
     fn assert_tensor_lists_match(
