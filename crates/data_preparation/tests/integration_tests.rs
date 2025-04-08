@@ -405,6 +405,84 @@ fn test_map() {
 }
 
 #[test]
+fn test_get_items() {
+    let (dataset, original_tensors) = setup_multi_key_dataset(); // 3 rows: 0, 1, 2
+
+    // --- Internal Helper Function for verifying get_items results ---
+    fn verify_get_items_result(
+        selected_items: &Vec<HashMap<String, &Tensor>>, // Input is the Vec of rows/items
+        expected_len: usize,
+        expected_indices: &[usize],
+        original_tensors: &HashMap<String, Vec<Tensor>>,
+        context: &str, // Context for error messages
+    ) {
+        // Check overall Vec length
+        assert_eq!(selected_items.len(), expected_len, "[{}] Incorrect number of items returned", context);
+        assert_eq!(selected_items.len(), expected_indices.len(), "[{}] Mismatch between expected len and expected indices len", context);
+
+        // Check each item (row map) in the result vector
+        for (i, item_map) in selected_items.iter().enumerate() {
+            let original_index = expected_indices[i]; // Get the corresponding original index
+
+            // --- Start of inlined logic from assert_row_matches ---
+            assert_eq!(item_map.len(), original_tensors.len(), "[{}] Row {} key count mismatch", context, i);
+            for (key, expected_list) in original_tensors {
+                let row_tensor = item_map.get(key).expect(&format!("[{}] Key '{}' missing in row map {}", context, key, i));
+                let original_tensor = &expected_list[original_index];
+
+                // Compare shape, kind, and data
+                assert_eq!(row_tensor.size(), original_tensor.size(), "[{}] Shape mismatch key '{}', row index {}", context, key, i);
+                assert_eq!(row_tensor.kind(), original_tensor.kind(), "[{}] Kind mismatch key '{}', row index {}", context, key, i);
+
+                if row_tensor.kind() == Kind::Float || row_tensor.kind() == Kind::Double {
+                     assert!(original_tensor.allclose(row_tensor, 1e-6, 1e-6, false), "[{}] Data mismatch key '{}', row index {}", context, key, i);
+                } else {
+                     assert!(original_tensor.eq_tensor(row_tensor).all().int64_value(&[]) == 1, "[{}] Data mismatch key '{}', row index {}", context, key, i);
+                }
+            }
+        }
+    }
+
+    // --- Test Case 1: Select subset [0, 2] ---
+    let indices1 = [0, 2];
+    let selected_items1 = dataset.get_items(&indices1).expect("Selecting [0, 2] failed");
+    verify_get_items_result(&selected_items1, 2, &indices1, &original_tensors, "Select [0, 2]");
+
+    // --- Test Case 2: Select subset [1, 0, 1] (reorder, duplicate) ---
+     let indices2 = [1, 0, 1];
+     let selected_items2 = dataset.get_items(&indices2).expect("Selecting [1, 0, 1] failed");
+     verify_get_items_result(&selected_items2, 3, &indices2, &original_tensors, "Select [1, 0, 1]");
+
+    // --- Test Case 3: Select single [1] ---
+    let indices3 = [1];
+    let selected_items3 = dataset.get_items(&indices3).expect("Selecting [1] failed");
+    verify_get_items_result(&selected_items3, 1, &indices3, &original_tensors, "Select [1]");
+
+    // --- Test Case 4: Select empty list ---
+    let indices4: [usize; 0] = [];
+    let selected_items4 = dataset.get_items(&indices4).expect("Selecting empty [] failed");
+    assert!(selected_items4.is_empty(), "Selecting empty indices should yield empty Vec");
+
+    // --- Test Case 5: Select with out-of-bounds index ---
+    let indices5 = [0, 3]; // Dataset length is 3, so index 3 is invalid
+    let result5 = dataset.get_items(&indices5);
+    assert!(result5.is_err(), "Selecting indices [0, 3] should fail");
+
+    // Check error type using if let and assert!
+    if let Err(err) = result5 { // Check if it's an Err
+        if let DataPrepError::Other(msg) = err { // Check if it's the correct variant
+            // Optionally check the message content
+            println!("Got expected error: {}", msg); // Optional print for debugging
+            assert!(msg.contains("Index 3 is out of bounds"), 
+            "Expected message about index out of bounds, got: {}", msg);
+        } else {
+            // If it's an Err, but not the right variant, fail the test using assert!
+            assert!(false, "Expected DataPrepError::Other for out of bounds error, got {:?}", err);
+        }
+    } 
+}
+
+#[test]
 fn test_filter() {
     // Helper function to compare two tensor lists 
     fn assert_tensor_lists_match(

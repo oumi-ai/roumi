@@ -81,6 +81,31 @@ impl SafetensorsDataset {
         self.dataset.tensors.get(key)
     }
 
+    /// Retrieves the tows at the specified indices as a vector of maps
+    pub fn get_items(&self, indices: &[usize]) -> Result<Vec<HashMap<String, &Tensor>>> {
+        let len = self.len(); 
+
+        // Validate indices 
+        for &index in indices {
+            if index >= len {
+                return Err(DataPrepError::Other(format!(
+                    "Index {} is out of bounds for dataset of length {}", index, len
+                )));
+            }
+        }
+
+        // Retrieve the rows at the specified indices 
+        let mut result = Vec::with_capacity(indices.len());
+        for &index in indices {
+            let row = self.get_by_index(index)
+                .ok_or_else(||{
+                    DataPrepError::Other(format!("Failed to access row at index {}", index))
+                })?;
+            result.push(row);
+        }
+        Ok(result)
+    }
+
     /// Selects specific indices from the dataset, returning a new dataset with rows corresponding to those indices
     pub fn select(&self, indices: &[usize]) -> Result<Self> {
         let len = self.len(); 
