@@ -116,6 +116,132 @@ fn test_save_invalid_key_to_safetensors_file() {
     }
 }
 
+// --- Rename Tests --- 
+#[test]
+fn test_rename_single_key() {
+    let (mut dataset, original_tensors) = setup_multi_key_dataset();
+    let key_mapping = vec![("features".to_string(), "inputs".to_string())];
+    let context = "Rename single key";
+
+    dataset.rename(&key_mapping).expect(&format!("[{}] Rename failed", context));
+    
+    assert_eq!(dataset.keys().len(), 2, "[{}] Dataset should still have 2 keys", context);
+    assert!(!dataset.contains_key("features"), "[{}] Key 'features' should no longer exist", context);
+    assert!(dataset.contains_key("inputs"), "[{}] Key 'inputs' should exist", context);
+    assert!(dataset.contains_key("labels"), "[{}] Key 'labels' should still exist", context);
+
+    // Verify tensor data remains correct 
+    let input_tensors = dataset.get_tensors("inputs").unwrap(); 
+    assert_eq!(input_tensors.len(), 3);
+    for i in 0..3 {
+        assert!(input_tensors[i].allclose(&original_tensors["features"][i], 1e-6, 1e-6, false),
+        "[{}] Mismatch at inputs[{}]", context, i);
+    }
+    let labels_tensors = dataset.get_tensors("labels").unwrap(); // Verify unchanged key too
+    assert_eq!(labels_tensors.len(), 3);
+    for i in 0..3 {
+         assert!(labels_tensors[i].eq_tensor(&original_tensors["labels"][i]).all().int64_value(&[]) == 1,
+                "[{}] Mismatch at labels[{}]", context, i);
+    }
+}
+
+#[test]
+fn test_rename_multiple_keys() {
+    let (mut dataset, original_tensors) = setup_multi_key_dataset();
+    let key_mapping = vec![
+        ("features".to_string(), "inputs".to_string()),
+        ("labels".to_string(), "targets".to_string()),
+    ];
+    let context = "Rename multiple keys";
+
+    dataset.rename(&key_mapping).expect(&format!("[{}] Rename failed", context));
+
+    assert_eq!(dataset.keys().len(), 2, "[{}] Dataset should still have 2 keys", context);
+    // Use contains_key
+    assert!(!dataset.contains_key("features"), "[{}] Key 'features' should no longer exist", context);
+    assert!(!dataset.contains_key("labels"), "[{}] Key 'labels' should no longer exist", context);
+    assert!(dataset.contains_key("inputs"), "[{}] Key 'inputs' should exist", context);
+    assert!(dataset.contains_key("targets"), "[{}] Key 'targets' should exist", context);
+
+    // Verify tensor data remains correct
+    let inputs_tensors = dataset.get_tensors("inputs").unwrap();
+    assert_eq!(inputs_tensors.len(), 3);
+    for i in 0..3 {
+        assert!(inputs_tensors[i].allclose(&original_tensors["features"][i], 1e-6, 1e-6, false),
+                "[{}] Mismatch at inputs[{}]", context, i);
+    }
+    let targets_tensors = dataset.get_tensors("targets").unwrap();
+    assert_eq!(targets_tensors.len(), 3);
+     for i in 0..3 {
+         assert!(targets_tensors[i].eq_tensor(&original_tensors["labels"][i]).all().int64_value(&[]) == 1,
+                "[{}] Mismatch at targets[{}]", context, i);
+    }
+}
+
+#[test]
+fn test_rename_error_nonexistent_old() {
+    let (mut dataset, _) = setup_multi_key_dataset();
+    let key_mapping = vec![("nonexistent".to_string(), "newkey".to_string())];
+    let context = "Rename Err Nonexistent Old";
+
+    let result = dataset.rename(&key_mapping);
+    assert!(result.is_err(), "[{}] Renaming non-existent key should fail", context);
+
+    // Check error type without panic!
+    if let Err(err) = result {
+        if let DataPrepError::InvalidKey(msg) = err {
+            assert!(msg.contains("Key 'nonexistent' to rename does not exist"),
+                    "[{}] Incorrect error message: {}", context, msg);
+        } else {
+            assert!(false, "[{}] Expected InvalidKey error, got {:?}", context, err);
+        }
+    }
+}
+
+#[test]
+fn test_rename_error_conflict_existing() {
+    let (mut dataset, _) = setup_multi_key_dataset();
+    let key_mapping = vec![("features".to_string(), "labels".to_string())]; // "labels" already exists
+    let context = "Rename Err Conflict Existing";
+
+    let result = dataset.rename(&key_mapping);
+    assert!(result.is_err(), "[{}] Renaming to existing key should fail", context);
+
+    // Check error type without panic!
+    if let Err(err) = result {
+        if let DataPrepError::InvalidKey(msg) = err {
+             assert!(msg.contains("New key 'labels' already exists"),
+                    "[{}] Incorrect error message: {}", context, msg);
+        } else {
+             assert!(false, "[{}] Expected InvalidKey error, got {:?}", context, err);
+        }
+    }
+}
+
+#[test]
+fn test_rename_error_duplicate_new() {
+    let (mut dataset, _) = setup_multi_key_dataset();
+    let key_mapping = vec![
+        ("features".to_string(), "newkey".to_string()),
+        ("labels".to_string(), "newkey".to_string()), // Duplicate "newkey"
+    ];
+     let context = "Rename Err Duplicate New";
+
+    let result = dataset.rename(&key_mapping);
+    assert!(result.is_err(), "[{}] Renaming with duplicate new keys should fail", context);
+
+    // Check error type without panic!
+    if let Err(err) = result {
+        if let DataPrepError::InvalidKey(msg) = err {
+             assert!(msg.contains("Duplicate new key 'newkey'"),
+                    "[{}] Incorrect error message: {}", context, msg);
+        } else {
+             assert!(false, "[{}] Expected InvalidKey error, got {:?}", context, err);
+        }
+    }
+}
+
+
 // --- Accessor Method Tests --- 
 #[test]
 fn test_contains_key() {

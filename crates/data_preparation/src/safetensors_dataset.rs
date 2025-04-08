@@ -258,6 +258,59 @@ impl SafetensorsDataset {
         Self::from_dict(transformed_tensors)
     }
 
+    /// Rename keys in the dataset according to the provided mapping 
+    /// # Arguments
+    /// * `key_mapping` - A slice of (old_key, new_key) pairs specifying the keys to rename.
+    pub fn rename(&mut self, key_mapping: &[(String, String)]) -> Result<()> {
+        // Validate the key mapping for duplicates in new keys 
+        let mut new_keys = HashSet::new(); 
+        for (_, new_key) in key_mapping {
+            if !new_keys.insert(new_key) {
+                return Err(DataPrepError::InvalidKey(format!(
+                    "Duplicate new key '{}' in key mapping", new_key
+                )));
+            }
+        }
+
+        // Validate that all old keys exist and new keys don't conflict 
+        let current_keys: HashSet<&String> = self.dataset.tensors.keys().collect(); 
+        let old_keys: HashSet<&String> = key_mapping.iter().map(|(old, _)| old).collect();
+        let new_keys: HashSet<&String> = key_mapping.iter().map(|(_, new)| new).collect(); 
+
+        // Check if all old keys exist 
+        for old_key in &old_keys {
+            if !current_keys.contains(old_key) {
+                return Err(DataPrepError::InvalidKey(format!(
+                    "Key '{}' to rename does not exist in the dataset", old_key
+                )));
+            }
+        }
+
+        // Check for conflicts: new keys that already exist and aren't being renamed 
+        let keys_to_remove: HashSet<&String> = old_keys; 
+        for new_key in &new_keys {
+            if current_keys.contains(new_key) && !keys_to_remove.contains(new_key) {
+                return Err(DataPrepError::InvalidKey(format!(
+                    "New key '{}' already exists in the dataset and is not being renamed", new_key
+                )));
+            }
+        }
+
+        // Perform the renaming 
+        let mut new_tensors = HashMap::with_capacity(self.dataset.tensors.len());
+        for (old_key, tensor_list) in self.dataset.tensors.drain() {
+            let new_key = key_mapping
+                .iter()
+                .find(|(old, _)| old == &old_key)
+                .map(|(_, new)| new.clone())
+                .unwrap_or(old_key);
+            new_tensors.insert(new_key, tensor_list);
+        }
+        self.dataset.tensors = new_tensors; 
+
+        Ok(())
+    }
+
     /// Access the inner Dataset immutably.
     pub fn inner_dataset(&self) -> &Dataset {
         &self.dataset
