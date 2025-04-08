@@ -183,6 +183,81 @@ fn test_get_by_index() {
     assert!(row_invalid_opt.is_none(), "Row at invalid index {} should be None", invalid_index);
 }
 
+#[test]
+fn test_select_indices() {
+    let (dataset, original_tensors) = setup_multi_key_dataset(); 
+
+    // Helper function to verify a selected dataset 
+    fn verify_selected(
+        selected: &SafetensorsDataset, 
+        expected_len: usize, 
+        expected_indices: &[usize], 
+        original_tensors: &HashMap<String, Vec<Tensor>>,
+    ) {
+        assert_eq!(selected.len(), expected_len, "Selected dataset length mismatch");
+        assert_eq!(selected.keys().len(), 2, "Selected dataset should have 2 keys");
+
+        // Verify features 
+        let features = selected.get_tensors("features").unwrap(); 
+        assert_eq!(features.len(), expected_len, "Features length mismatch");
+        for (i, &orig_idx) in expected_indices.iter().enumerate() {
+            assert!(
+                features[i].allclose(&original_tensors["features"][orig_idx], 1e-6, 1e-6, false),
+                "Mismatch at features[{}] (original index {})", i, orig_idx
+            );
+        }
+
+        // Verify labels 
+        let labels = selected.get_tensors("labels").unwrap(); 
+        assert_eq!(labels.len(), expected_len, "Labels length mismatch"); 
+        for (i, &orig_idx) in expected_indices.iter().enumerate() {
+            assert!(
+                labels[i].eq_tensor(&original_tensors["labels"][orig_idx]).all().int64_value(&[]) == 1,
+                "Mismatch at labels [{}] (original index {})", i, orig_idx
+            );
+        }
+    }
+
+    // Test Case 1: Select a subset in order
+    let indices1 = [0, 2]; 
+    let selected1 = dataset.select(&indices1).expect("Selecting valid indices [0, 2] failed");
+    verify_selected(&selected1, 2, &indices1, &original_tensors);
+
+    // Test Case 2: Select subset out of order with duplicates 
+    let indices2 = [1, 0, 1]; 
+    let selected2 = dataset.select(&indices2).expect("Selecting valid indices [1, 0, 1] failed");
+    verify_selected(&selected2, 3, &indices2, &original_tensors);
+
+    // Test Case 3: Select single element 
+    let indices3 = [1]; 
+    let selected3 = dataset.select(&indices3).expect("Selecting single index [1] failed");
+    verify_selected(&selected3, 1, &indices3, &original_tensors);
+
+    // Test Case 4: Select empty list 
+    let indices4: [usize; 0] = [];
+    let selected4 = dataset.select(&indices4).expect("Selecting empty indices [] failed");
+    assert_eq!(selected4.len(), 0, "Selected dataset should have length 0");
+    assert_eq!(selected4.keys().len(), 2, "Selected dataset should have 2 keys");
+    assert!(selected4.get_tensors("features").unwrap().is_empty(), "Features should be empty");
+    assert!(selected4.get_tensors("labels").unwrap().is_empty(), "Labels should be empty");
+
+    // Test Case 5: Select with out-of-bounds index 
+    let indices5 = [0, 3];
+    let result = dataset.select(&indices5);
+    assert!(result.is_err(), "Selecting indices [0, 3] should fail");
+    let err = result.unwrap_err(); 
+    match err {
+        DataPrepError::Other(msg) => {
+            assert!(
+                msg.contains("Index 3 is out of bounds for dataset of length 3"),
+                "Expected error message to contain 'Index 3 is out of bounds for dataset of length 3', got '{}'",
+                msg
+            );
+        }
+        _ => assert!(false, "Expected DataPrepError::Other, got {:?}", err),
+    }
+}
+
 // --- Constructor/Edge Case Tests ---
 #[test]
 fn test_load_missing_metadata_from_safetensors_file_fails() {

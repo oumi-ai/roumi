@@ -70,6 +70,46 @@ impl SafetensorsDataset {
         self.dataset.tensors.get(key)
     }
 
+    /// Selects specific indices from the dataset, returning a new dataset with rows corresponding to those indices
+    pub fn select(&self, indices: &[usize]) -> Result<Self> {
+        let len = self.len(); 
+
+        // Validate indices 
+        for &index in indices {
+            if index >= len {
+                return Err(DataPrepError::Other(format!(
+                    "Index {} is out of bounds for dataset of length {}", index, len
+                )));
+            }
+        }
+
+        // Initialize the selected tensors map with empty vectors for each key 
+        let mut selected_tensors: HashMap<String, Vec<Tensor>> = HashMap::new(); 
+        for key in self.keys() {
+            selected_tensors.insert(key.to_string(), Vec::with_capacity(indices.len()));
+        }
+
+        // If indices is empty, return a dataset with empty tensor lists 
+        if indices.is_empty() {
+            return Ok(SafetensorsDataset { 
+                dataset:Dataset::new(selected_tensors),
+            });
+        }
+
+        // Select the rows at the specified indices 
+        for &index in indices {
+            let row = self.get_by_index(index)
+                .ok_or_else(|| {
+                    DataPrepError::InconsistentTensorList(format!("Failed to access row at index {}", index))
+                })?;
+                for (key, tensor) in row {
+                    let tensors = selected_tensors.get_mut(key.as_str()).unwrap(); 
+                    tensors.push(tensor.shallow_clone());
+                }
+        }
+        Self::from_dict(selected_tensors)
+    }
+
     /// Access the inner Dataset immutably.
     pub fn inner_dataset(&self) -> &Dataset {
         &self.dataset
