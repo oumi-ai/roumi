@@ -1,4 +1,4 @@
 
 fn main(){
-    println!("Running the data_preparation CLI demo!"); 
+    println!("Running the data_preparation demo!"); 
 }
