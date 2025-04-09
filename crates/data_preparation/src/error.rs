@@ -1,7 +1,7 @@
 // src/error.rs
-use std::{fmt, io};
 use safetensors; // Assuming safetensors crate is accessible
 use serde_json;
+use std::{fmt, io};
 use tch; // Assuming tch crate is accessible for potential tensor errors
 
 #[derive(Debug)]
@@ -23,11 +23,15 @@ impl fmt::Display for DataPrepError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DataPrepError::Io(e) => write!(f, "I/O error: {}", e),
-            DataPrepError::SerdeJson(e) => write!(f, "JSON serialization/deserialization error: {}", e),
+            DataPrepError::SerdeJson(e) => {
+                write!(f, "JSON serialization/deserialization error: {}", e)
+            }
             DataPrepError::Safetensor(e) => write!(f, "Safetensor error: {}", e),
             DataPrepError::Tch(e) => write!(f, "LibTorch error: {}", e),
             DataPrepError::InvalidKey(e) => write!(f, "Invalid key: {}", e),
-            DataPrepError::InconsistentTensorList(e) => write!(f, "Inconsistent tensor list: {}", e),
+            DataPrepError::InconsistentTensorList(e) => {
+                write!(f, "Inconsistent tensor list: {}", e)
+            }
             DataPrepError::MetadataNotFound(e) => write!(f, "Metadata not found: {}", e),
             DataPrepError::MetadataFormat(e) => write!(f, "Metadata format error: {}", e),
             DataPrepError::UnsupportedDtype(e) => write!(f, "Unsupported dtype: {}", e),

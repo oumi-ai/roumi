@@ -2,8 +2,8 @@
 
 //! # data_preparation Crate
 //!
-//! This crate provides support for managing collections of tensors, 
-//! in the '.safetensors' file format. 
+//! This crate provides support for managing collections of tensors,
+//! in the '.safetensors' file format.
 //!
 //! ## Key Features
 //! ====================================================================================
@@ -71,14 +71,13 @@
 //!   associated save/load logic for the Safetensors format.
 //! - `error`: Defines the crate's custom error type `DataPrepError` and `Result` alias.
 
-
 // Declare modules
-mod dataset; 
-mod safetensors_dataset; 
-mod error; 
-mod info; 
+mod dataset;
+mod error;
+mod info;
+mod safetensors_dataset;
 
-pub use dataset::Dataset; 
-pub use safetensors_dataset::SafetensorsDataset;
-pub use info::{DatasetInfo, TensorLayout};
+pub use dataset::Dataset;
 pub use error::{DataPrepError, Result};
+pub use info::{DatasetInfo, TensorLayout};
+pub use safetensors_dataset::SafetensorsDataset;

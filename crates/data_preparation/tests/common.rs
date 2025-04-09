@@ -10,17 +10,21 @@ use tch::{kind, Kind, Tensor};
 ///
 /// # Panics
 /// - If dataset creation fails.
-pub fn setup_float_dataset_for_test(num_tensors: i64, dim_size: i64, key: &str) -> SafetensorsDataset {
+pub fn setup_float_dataset_for_test(
+    num_tensors: i64,
+    dim_size: i64,
+    key: &str,
+) -> SafetensorsDataset {
     let tensor_shape = [num_tensors, dim_size];
     let test_data = Tensor::ones(&tensor_shape, kind::FLOAT_CPU);
 
     let test_tensors: Vec<Tensor> = (0..num_tensors)
         .map(|i| test_data.index_select(0, &Tensor::from_slice(&[i])))
         .collect();
-    
+
     let mut tensors_map = HashMap::new();
     tensors_map.insert(key.to_string(), test_tensors);
-    
+
     SafetensorsDataset::from_dict(tensors_map).expect("Setup failed")
 }
 
@@ -29,31 +33,33 @@ pub fn setup_float_dataset_for_test(num_tensors: i64, dim_size: i64, key: &str) 
 /// - "labels": 3 scalar tensors: 10, 11, 12
 /// Also returns a clone of the original tensors for easy verification.
 pub fn setup_multi_key_dataset() -> (SafetensorsDataset, HashMap<String, Vec<Tensor>>) {
-    let num_rows = 3; 
-    
+    let num_rows = 3;
+
     let features_list: Vec<Tensor> = (0..num_rows)
         .map(|i| Tensor::f_from_slice(&[i as f32]).unwrap().reshape(&[1, 1]))
-        .collect(); 
+        .collect();
 
     let labels_list: Vec<Tensor> = (0..num_rows)
-        .map(|i| Tensor::from(i+10).to_kind(Kind::Int64))
-        .collect(); 
+        .map(|i| Tensor::from(i + 10).to_kind(Kind::Int64))
+        .collect();
 
-    let mut tensors_map = HashMap::new(); 
+    let mut tensors_map = HashMap::new();
     tensors_map.insert(
-        "features".to_string(), 
-        features_list.iter().map(|t| t.shallow_clone()).collect());
+        "features".to_string(),
+        features_list.iter().map(|t| t.shallow_clone()).collect(),
+    );
     tensors_map.insert(
-        "labels".to_string(), 
-        labels_list.iter().map(|t| t.shallow_clone()).collect());
-    
+        "labels".to_string(),
+        labels_list.iter().map(|t| t.shallow_clone()).collect(),
+    );
+
     let dataset = SafetensorsDataset::from_dict(tensors_map).expect("Setup failed");
-    
+
     let original_tensors = HashMap::from([
         ("features".to_string(), features_list),
         ("labels".to_string(), labels_list),
     ]);
-    
+
     (dataset, original_tensors)
 }
 
@@ -74,23 +80,24 @@ where
 {
     let total_needed = num_tensors * dims.iter().product::<i64>();
     assert_eq!(
-        values.len() as i64, total_needed,
+        values.len() as i64,
+        total_needed,
         "Incorrect number of values provided: need {}, got {}",
-        total_needed, values.len()
+        total_needed,
+        values.len()
     );
     let original_tensor_list: Vec<Tensor> = values
         .chunks(dims.iter().product::<i64>() as usize)
-        .map(|chunk| {
-            Tensor::from_slice(chunk)
-                .to_kind(kind)
-                .reshape(dims)
-        })
+        .map(|chunk| Tensor::from_slice(chunk).to_kind(kind).reshape(dims))
         .collect();
 
     let mut verification_map = HashMap::new();
     verification_map.insert(
         key.to_string(),
-        original_tensor_list.iter().map(|t| t.shallow_clone()).collect(),
+        original_tensor_list
+            .iter()
+            .map(|t| t.shallow_clone())
+            .collect(),
     );
 
     let mut dataset_map = HashMap::new();

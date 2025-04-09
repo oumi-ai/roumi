@@ -1,8 +1,8 @@
 use data_preparation::{DataPrepError, SafetensorsDataset};
 use std::collections::HashMap;
-use tch::Tensor; 
+use tch::Tensor;
 
-/// Basic constructor tests for from_dict, empty, etc. 
+/// Basic constructor tests for from_dict, empty, etc.
 
 #[test]
 fn test_from_dict_allows_empty_lists() {
@@ -15,8 +15,15 @@ fn test_from_dict_allows_empty_lists() {
 #[test]
 fn test_empty_dataset() {
     let dataset = SafetensorsDataset::empty(vec!["features".to_string(), "labels".to_string()]);
-    assert!(dataset.is_empty(), "Newly created empty dataset should be empty");
-    assert_eq!(dataset.keys().len(), 2, "Should have 2 keys with empty vectors");
+    assert!(
+        dataset.is_empty(),
+        "Newly created empty dataset should be empty"
+    );
+    assert_eq!(
+        dataset.keys().len(),
+        2,
+        "Should have 2 keys with empty vectors"
+    );
 }
 
 #[test]

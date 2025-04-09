@@ -47,7 +47,10 @@ fn test_rename_single_key() {
 
     dataset.rename(&mappings).expect("Rename should succeed");
     assert!(dataset.contains_key("inputs"), "Key 'inputs' missing");
-    assert!(!dataset.contains_key("features"), "Old key 'features' should be gone");
+    assert!(
+        !dataset.contains_key("features"),
+        "Old key 'features' should be gone"
+    );
 
     let inputs = dataset.get_tensors("inputs").unwrap();
     assert_eq!(inputs.len(), 3);

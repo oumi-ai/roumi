@@ -1,5 +1,5 @@
-mod common; 
-use common::setup_multi_key_dataset; 
+mod common;
+use common::setup_multi_key_dataset;
 use std::collections::HashMap;
 use tch::Kind;
 
@@ -19,10 +19,16 @@ fn test_get_row_and_get_rows() {
     );
 
     // get_rows([1, 0, 2])
-    let rows = dataset.get_rows(&[1, 0, 2]).expect("get_rows should succeed");
+    let rows = dataset
+        .get_rows(&[1, 0, 2])
+        .expect("get_rows should succeed");
     assert_eq!(rows.len(), 3, "Should have 3 row-maps");
     // Spot check
-    assert_eq!(rows[0]["labels"].int64_value(&[]), 11, "Mismatch at row 1's labels");
+    assert_eq!(
+        rows[0]["labels"].int64_value(&[]),
+        11,
+        "Mismatch at row 1's labels"
+    );
 }
 
 #[test]
@@ -84,6 +90,10 @@ fn test_map_transform() {
     assert_eq!(mapped.len(), 3, "Mapped dataset should have 3 rows");
     let feats = mapped.get_tensors("features").unwrap();
     let labs = mapped.get_tensors("labels").unwrap();
-    assert_eq!(feats[0].double_value(&[0, 0]), 10.0, "features row0 mismatch");
+    assert_eq!(
+        feats[0].double_value(&[0, 0]),
+        10.0,
+        "features row0 mismatch"
+    );
     assert_eq!(labs[0].double_value(&[]), 10.5, "labels row0 mismatch");
 }

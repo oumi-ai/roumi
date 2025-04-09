@@ -13,4 +13,4 @@ fn test_load_metadata_wrong_type_from_safetensors_file_fails() {
 }
 
 // TODO: Add integration tests for Half, Bfloat types save/load.
-// TODO: test_info_varying_dtype_layout: Not yet supported as we assume that our tensors have the same dtype; 
+// TODO: test_info_varying_dtype_layout: Not yet supported as we assume that our tensors have the same dtype;

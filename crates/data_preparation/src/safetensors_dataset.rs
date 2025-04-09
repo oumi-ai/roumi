@@ -1,9 +1,9 @@
 // src/safetensors.rs
-use crate::dataset::Dataset; 
-use crate::error::{DataPrepError, Result}; 
+use crate::dataset::Dataset;
+use crate::error::{DataPrepError, Result};
 use crate::info::{DatasetInfo, TensorLayout};
 
-use safetensors::{serialize, Dtype, SafeTensors, tensor::TensorView};
+use safetensors::{serialize, tensor::TensorView, Dtype, SafeTensors};
 use serde_json::{self, Value};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
@@ -12,36 +12,36 @@ use std::io::{Read, Write};
 use std::path::Path;
 use tch::{Kind, Tensor};
 
-/// --- Struct Definition --- 
-/// 
+/// --- Struct Definition ---
+///
 /// A wrapper around `Dataset` that stores 'HashMap<String, Vec<Tensor>>`
-/// and supports saving/loading to the `.safetensors` format. 
-/// 
+/// and supports saving/loading to the `.safetensors` format.
+///
 /// Provides row-level access/manipulation (e.g., `get_row`, `filter`, `map`)
-/// and enforces consistent dtypes within each key. 
+/// and enforces consistent dtypes within each key.
 #[derive(Debug)]
 pub struct SafetensorsDataset {
-    // The internal dataset storage. 
-    dataset: Dataset, 
+    // The internal dataset storage.
+    dataset: Dataset,
 }
 
 impl SafetensorsDataset {
     // ---------------------------------------------------------------------------------------
-    // Constructors 
+    // Constructors
     // ---------------------------------------------------------------------------------------
 
-    /// Creates a new `SafetensorsDataset` from a map of tensor lists. 
-    /// 
+    /// Creates a new `SafetensorsDataset` from a map of tensor lists.
+    ///
     /// # Arguments
-    /// - 'tensors': A map where each key is a feature name (e.g., "inputs", "labels") and 
+    /// - 'tensors': A map where each key is a feature name (e.g., "inputs", "labels") and
     ///              the value is a non-empty `Vec<Tensor>` with consistent `Kind` (dtype).
-    /// 
-    /// # Errors 
-    /// - ` DataPrepError::InconsistentTensorList` if: 
-    ///    1) Any list is empty,  
+    ///
+    /// # Errors
+    /// - ` DataPrepError::InconsistentTensorList` if:
+    ///    1) Any list is empty,
     ///    2) Any list contains mixed dtypes.
-    /// 
-    /// # Example 
+    ///
+    /// # Example
     /// ```rust
     /// # use data_preparation::SafetensorsDataset;
     /// # use tch::Tensor;
@@ -52,36 +52,36 @@ impl SafetensorsDataset {
     /// assert_eq!(dataset.len(), 1);
     /// ```
     pub fn from_dict(tensors: HashMap<String, Vec<Tensor>>) -> Result<Self> {
-        // Check each key for non-emptiness and dtype consistency. 
+        // Check each key for non-emptiness and dtype consistency.
         for (key, value) in &tensors {
             if value.is_empty() {
-                continue; 
+                continue;
             }
             // if value.is_empty() {
             //   return Err(DataPrepError::InconsistentTensorList(format!(
             //        "Input tensor list for key '{}' cannot be empty.", key
             //    )));
-            //} 
-            let first_kind = value[0].kind(); 
+            //}
+            let first_kind = value[0].kind();
             if !value.iter().all(|t| t.kind() == first_kind) {
                 return Err(DataPrepError::InconsistentTensorList(format!(
-                    "Inconsistent dtypes found in list for key '{}'. Expected {:?}", 
+                    "Inconsistent dtypes found in list for key '{}'. Expected {:?}",
                     key, first_kind
                 )));
             }
         }
-        Ok(SafetensorsDataset{
+        Ok(SafetensorsDataset {
             dataset: Dataset::new(tensors),
         })
     }
 
-    /// Creates an empty `SafetensorsDataset`, initializing each provided key 
-    /// with an empty vector of tensors.  
-    /// 
-    /// This is useful for setting up a dataset structure that you plan to fill later 
-    /// or for testing code that expects a dataset but does not require data. 
-    /// 
-    /// # Example 
+    /// Creates an empty `SafetensorsDataset`, initializing each provided key
+    /// with an empty vector of tensors.
+    ///
+    /// This is useful for setting up a dataset structure that you plan to fill later
+    /// or for testing code that expects a dataset but does not require data.
+    ///
+    /// # Example
     /// ```rust
     /// # use data_preparation::SafetensorsDataset;
     /// let dataset = SafetensorsDataset::empty(vec!["input".to_string()]);
@@ -92,27 +92,27 @@ impl SafetensorsDataset {
         for key in keys {
             empty_tensors.insert(key, Vec::new());
         }
-        SafetensorsDataset { 
-            dataset: Dataset::new(empty_tensors) 
+        SafetensorsDataset {
+            dataset: Dataset::new(empty_tensors),
         }
-    }  
+    }
 
     // ---------------------------------------------------------------------------------------
-    // Basic Accessors 
+    // Basic Accessors
     // ---------------------------------------------------------------------------------------
 
     /// Returns the number of rows in the dataset (based on the first non-empty tensor list).
-    /// 
-    /// # Warning 
-    /// This method does not ensure all keys have the same length. It simply returns the 
-    /// length of the first non-empty list it encounters. If different keys have different 
+    ///
+    /// # Warning
+    /// This method does not ensure all keys have the same length. It simply returns the
+    /// length of the first non-empty list it encounters. If different keys have differen
     /// lengths, row-based operations (e.g., ['get_row']) may fail or return `None`
-    /// for out-of-bound indices.  
-    /// 
-    /// # TODO 
-    /// - Add support for variable-length tensors 
-    /// 
-    /// # Example 
+    /// for out-of-bound indices.
+    ///
+    /// # TODO
+    /// - Add support for variable-length tensors
+    ///
+    /// # Example
     /// ```rust
     /// # use data_preparation::SafetensorsDataset;
     /// # use tch::Tensor;
@@ -126,12 +126,12 @@ impl SafetensorsDataset {
         self.dataset.len()
     }
 
-    /// Returns `true` if the dataset contains no rows. 
-    /// 
-    /// A dataset is empty if: 
-    /// - It has no keys, or 
-    /// - Every key's vector of tensors is empty. 
-    /// 
+    /// Returns `true` if the dataset contains no rows.
+    ///
+    /// A dataset is empty if:
+    /// - It has no keys, or
+    /// - Every key's vector of tensors is empty.
+    ///
     /// # Example
     /// ```rust
     /// # use data_preparation::SafetensorsDataset;
@@ -142,35 +142,35 @@ impl SafetensorsDataset {
         self.dataset.is_empty()
     }
 
-    /// Returns a set of references to all the keys in this dataset. 
-    /// 
-    /// # Example 
+    /// Returns a set of references to all the keys in this dataset.
+    ///
+    /// # Example
     /// ```rust
     /// # use data_preparation::SafetensorsDataset;
-    /// # use tch::Tensor; 
+    /// # use tch::Tensor;
     /// # use std::collections::{HashMap, HashSet};
     /// let dataset = SafetensorsDataset::from_dict(HashMap::from([
     ///     ("key1".to_string(), vec![Tensor::from(1)]),
     ///     ("key2".to_string(), vec![Tensor::from(2)])
-    /// ])).unwrap(); 
-    /// let keys = dataset.keys(); 
+    /// ])).unwrap();
+    /// let keys = dataset.keys();
     /// assert!(keys.iter().any(|k| *k == "key1"));
     /// assert!(keys.iter().any(|k| *k == "key2"));
     /// ```
     pub fn keys(&self) -> HashSet<&String> {
         self.dataset.tensors.keys().collect()
     }
-    
-    /// Returns `true` if the dataset contains the specified key. 
-    /// 
-    /// # Arguments 
-    /// - `key`: The feature name to check for 
-    /// 
-    /// # Example 
+
+    /// Returns `true` if the dataset contains the specified key.
+    ///
+    /// # Arguments
+    /// - `key`: The feature name to check for
+    ///
+    /// # Example
     /// ```rust
     /// # use data_preparation::SafetensorsDataset;
     /// # use tch::Tensor;
-    /// # use std::collections::HashMap; 
+    /// # use std::collections::HashMap;
     /// let dataset = SafetensorsDataset::from_dict(HashMap::from([
     ///     ("key1".to_string(), vec![Tensor::from(1)])
     /// ])).unwrap();
@@ -181,16 +181,16 @@ impl SafetensorsDataset {
         self.dataset.tensors.contains_key(key)
     }
 
-    /// Returns a reference to the `Vec<Tensor>` for a given key, if it exists. 
-    /// 
-    /// # Example 
+    /// Returns a reference to the `Vec<Tensor>` for a given key, if it exists.
+    ///
+    /// # Example
     /// ```rust
     /// # use data_preparation::SafetensorsDataset;
     /// # use tch::Tensor;
-    /// # use std::collections::HashMap; 
+    /// # use std::collections::HashMap;
     /// let dataset = SafetensorsDataset::from_dict(HashMap::from([
     ///     ("features".to_string(), vec![Tensor::from(1), Tensor::from(2)])
-    /// ])).unwrap(); 
+    /// ])).unwrap();
     /// let maybe_tensors = dataset.get_tensors("features");
     /// assert!(maybe_tensors.is_some());
     /// assert_eq!(maybe_tensors.unwrap().len(), 2);
@@ -200,133 +200,131 @@ impl SafetensorsDataset {
     }
 
     // ---------------------------------------------------------------------------------------
-    // Row-level Access / Manipulation 
+    // Row-level Access / Manipulation
     // ---------------------------------------------------------------------------------------
-    
+
     /// Retrieves a single "row" by index, returning a `HashMap<String, &Tensor>`
-    /// where each entry is a reference tensor of that index for the 
-    /// corresponding key. 
-    /// 
+    /// where each entry is a reference tensor of that index for the
+    /// corresponding key.
+    ///
     /// # Warning
-    /// If your dataset has keys with different lengths, this returns 
-    /// `None` for any index that is out of bounds for at least one key. 
-    /// 
+    /// If your dataset has keys with different lengths, this returns
+    /// `None` for any index that is out of bounds for at least one key.
+    ///
     /// # Differences vs. [`get_rows`]
     /// - `get_row(index)` returns exactly one `Option<HashMap<String, &Tensor>>`.
     /// - `get_rows(indices)` can getch multiple rows at once (returning a `Vec`).
-    /// 
+    ///
     /// # Differences vs. [`select`]
-    /// - `get_row` is read-only and returns a single row by reference. 
-    /// - `select` produces an entirely new `SafetensorsDataset` that 
+    /// - `get_row` is read-only and returns a single row by reference.
+    /// - `select` produces an entirely new `SafetensorsDataset` tha
     ///    contains only the specified rows (by shallow copy)
-    /// 
+    ///
     /// # Example
     ///  ```rust
     /// # use data_preparation::SafetensorsDataset;
     /// # use tch::Tensor;
-    /// # use std::collections::HashMap; 
+    /// # use std::collections::HashMap;
     /// let dataset = SafetensorsDataset::from_dict(HashMap::from([
     ///     ("key".to_string(), vec![Tensor::from(1), Tensor::from(2)])
     /// ])).unwrap();
-    /// 
+    ///
     /// // Retrieve the second row (index 1)
-    /// let row = dataset.get_row(1).unwrap(); 
+    /// let row = dataset.get_row(1).unwrap();
     /// assert_eq!(row["key"].int64_value(&[]), 2);
     /// ```
     pub fn get_row(&self, index: usize) -> Option<HashMap<String, &Tensor>> {
         if index >= self.len() {
-            return None; 
+            return None;
         }
-        let mut row = HashMap::new(); 
+        let mut row = HashMap::new();
         for (key, tensors) in &self.dataset.tensors {
             if index < tensors.len() {
                 row.insert(key.clone(), &tensors[index]);
             } else {
-                return None; 
+                return None;
             }
         }
         Some(row)
     }
 
     /// Retrieves multiple rows at once, returning a `Vec<HashMap<String, &Tensor>>`.
-    /// 
-    /// Each element in the returned `Vec` corresponds to one row at the specified 
-    /// index across all keys. If any requested index is out of range for any key, 
-    /// an error is returned. 
-    /// 
+    ///
+    /// Each element in the returned `Vec` corresponds to one row at the specified
+    /// index across all keys. If any requested index is out of range for any key,
+    /// an error is returned.
+    ///
     /// # Differences vs. [`get_row`]
     /// - `get_rows` allows you to fetch many rows simultaneously (`&[0. 2. 5]`, etc. )
     /// - `get_row(index)` only fetches a single row and returns an `Option` rather than
-    /// an entire `Vec`. 
-    /// 
+    /// an entire `Vec`.
+    ///
     /// # Differences vs. [`select`]
-    /// - `get_rows` is read only: you get references to existing tensors. 
+    /// - `get_rows` is read only: you get references to existing tensors.
     /// - `select` constructs a **new** `SafetensorsDataset` that has exactly those rows.
     ///   In other words, `select(&[0, 2])` returns a `SafetensorsDataset` with 2 rows,
     ///   while `get_rows(&[0, 2])` returns a `Vec` of 2 row-maps for the *existing* dataset.
-    /// 
+    ///
     /// # Example
     /// ```rust
-    /// # use data_preparation::SafetensorsDataset; 
-    /// # use tch::Tensor; 
-    /// # use std::collections::HashMap; 
+    /// # use data_preparation::SafetensorsDataset;
+    /// # use tch::Tensor;
+    /// # use std::collections::HashMap;
     /// let dataset = SafetensorsDataset::from_dict(HashMap::from([
     ///     ("key1".to_string(), vec![Tensor::from(10), Tensor::from(20), Tensor::from(30)]),
-    ///     ("key2".to_string(), vec![Tensor::from(100), Tensor::from(200), Tensor::from(300)]),  
+    ///     ("key2".to_string(), vec![Tensor::from(100), Tensor::from(200), Tensor::from(300)]),
     /// ])).unwrap();
-    /// 
-    /// // Retrieve the 0th and 2nd rows 
-    /// let rows = dataset.get_rows(&[0, 2]).unwrap(); 
-    /// assert_eq!(rows.len(), 2); 
+    ///
+    /// // Retrieve the 0th and 2nd rows
+    /// let rows = dataset.get_rows(&[0, 2]).unwrap();
+    /// assert_eq!(rows.len(), 2);
     /// assert_eq!(rows[0]["key1"].int64_value(&[]), 10);
-    /// assert_eq!(rows[0]["key2"].int64_value(&[]), 100); 
-    /// assert_eq!(rows[1]["key1"].int64_value(&[]), 30); 
-    /// assert_eq!(rows[1]["key2"].int64_value(&[]), 300); 
+    /// assert_eq!(rows[0]["key2"].int64_value(&[]), 100);
+    /// assert_eq!(rows[1]["key1"].int64_value(&[]), 30);
+    /// assert_eq!(rows[1]["key2"].int64_value(&[]), 300);
     /// ```
-    pub fn get_rows(&self, indices: &[usize]) -> Result<Vec<HashMap<String, &Tensor>>>  {
+    pub fn get_rows(&self, indices: &[usize]) -> Result<Vec<HashMap<String, &Tensor>>> {
         let len = self.len();
         for &index in indices {
             if index >= len {
                 return Err(DataPrepError::Other(format!(
-                    "Index {} is out of bounds for dataset of length {}.", 
+                    "Index {} is out of bounds for dataset of length {}.",
                     index, len
                 )));
             }
         }
         let mut result = Vec::with_capacity(indices.len());
         for &index in indices {
-            let row = self
-                .get_row(index)
-                .ok_or_else(|| {
-                    DataPrepError::Other(format!("Failed to retrieve row at index {}", index))
-                })?;
+            let row = self.get_row(index).ok_or_else(|| {
+                DataPrepError::Other(format!("Failed to retrieve row at index {}", index))
+            })?;
             result.push(row);
         }
         Ok(result)
     }
 
-    /// Returns a new `SafetensorsDataset` containing only the rows at the 
-    /// specified indices. For each key, only the tensors at those indices are 
-    /// shallow-cloned into the new dataset 
-    /// 
+    /// Returns a new `SafetensorsDataset` containing only the rows at the
+    /// specified indices. For each key, only the tensors at those indices are
+    /// shallow-cloned into the new datase
+    ///
     /// Note if you just want to read a few rows by reference, use `get_rows`
-    /// or `get_row` instead.  
-    /// 
-    /// # Example 
+    /// or `get_row` instead.
+    ///
+    /// # Example
     /// ```rust
-    /// # use data_preparation::SafetensorsDataset; 
-    /// # use tch::Tensor; 
-    /// # use std::collections::HashMap; 
+    /// # use data_preparation::SafetensorsDataset;
+    /// # use tch::Tensor;
+    /// # use std::collections::HashMap;
     /// let dataset = SafetensorsDataset::from_dict(HashMap::from([
     ///     ("k".to_string(), vec![Tensor::from(0), Tensor::from(1), Tensor::from(2)])
     /// ])).unwrap();
-    /// 
-    /// // Create a new dataset with only rows 1 and 2 
-    /// let subset = dataset.select(&[1, 2]).unwrap(); 
+    ///
+    /// // Create a new dataset with only rows 1 and 2
+    /// let subset = dataset.select(&[1, 2]).unwrap();
     /// assert_eq!(subset.len(), 2);
     /// ```
     pub fn select(&self, indices: &[usize]) -> Result<Self> {
-        let len = self.len(); 
+        let len = self.len();
         for &index in indices {
             if index >= len {
                 return Err(DataPrepError::Other(format!(
@@ -336,8 +334,8 @@ impl SafetensorsDataset {
             }
         }
 
-        // Prepare an empty structure to store the selected rows 
-        let mut selected_tensors: HashMap<String, Vec<Tensor>> = HashMap::new(); 
+        // Prepare an empty structure to store the selected rows
+        let mut selected_tensors: HashMap<String, Vec<Tensor>> = HashMap::new();
         for key in self.keys() {
             selected_tensors.insert(key.to_string(), Vec::with_capacity(indices.len()));
         }
@@ -349,60 +347,62 @@ impl SafetensorsDataset {
             });
         }
 
-        // Retrieve each row, then PUSH its tensors with a deep copy into the new map 
+        // Retrieve each row, then PUSH its tensors with a deep copy into the new map
         for &index in indices {
-            let row = self.get_row(index)
-                .ok_or_else(||{
-                    DataPrepError::InconsistentTensorList(format!(
-                        "Failed to access row at index {}.",
-                        index
-                    ))
-                })?;
-                for (key, tensor) in row {
-                    selected_tensors
-                        .get_mut(key.as_str())
-                        .unwrap()
-                        .push(tensor.shallow_clone())
-                }
+            let row = self.get_row(index).ok_or_else(|| {
+                DataPrepError::InconsistentTensorList(format!(
+                    "Failed to access row at index {}.",
+                    index
+                ))
+            })?;
+            for (key, tensor) in row {
+                selected_tensors
+                    .get_mut(key.as_str())
+                    .unwrap()
+                    .push(tensor.shallow_clone())
+            }
         }
         Self::from_dict(selected_tensors)
     }
 
-    /// Returns a new `SafetensorsDataset` containing only rows for which the 
+    /// Returns a new `SafetensorsDataset` containing only rows for which the
     /// provided predicate function returns `true`.
-    /// 
-    /// # Type Parameters 
-    /// - `F`: A closure or function that takes a map representing the row 
+    ///
+    /// # Type Parameters
+    /// - `F`: A closure or function that takes a map representing the row
     ///        (key -> &Tensor) and returns a `bool`.
-    /// 
+    ///
     /// # Example
     /// ```rust
-    /// # use data_preparation::SafetensorsDataset; 
+    /// # use data_preparation::SafetensorsDataset;
     /// # use tch::Tensor;
-    /// # use std::collections::HashMap; 
+    /// # use std::collections::HashMap;
     /// let dataset = SafetensorsDataset::from_dict(HashMap::from([
     ///     ("x".to_string(), vec![Tensor::from(1), Tensor::from(2), Tensor::from(3)]),
-    ///     ("y".to_string(), vec![Tensor::from(10), Tensor::from(20), Tensor::from(30)]), 
-    /// ])).unwrap(); 
-    /// 
+    ///     ("y".to_string(), vec![Tensor::from(10), Tensor::from(20), Tensor::from(30)]),
+    /// ])).unwrap();
+    ///
     /// // Keep only rows where x > 1
-    /// let filtered = dataset.filter(|row| row["x"].int64_value(&[]) > 1).unwrap(); 
+    /// let filtered = dataset.filter(|row| row["x"].int64_value(&[]) > 1).unwrap();
     /// assert_eq!(filtered.len(), 2); // The rows with x = 2 and x = 3 remain
     /// ```
-    pub fn filter<F>(&self, f:F) -> Result<Self> 
-    where 
-        F: Fn(&HashMap<String, &Tensor>) -> bool, 
+    pub fn filter<F>(&self, f: F) -> Result<Self>
+    where
+        F: Fn(&HashMap<String, &Tensor>) -> bool,
     {
         let mut filtered_tensors: HashMap<String, Vec<Tensor>> = self
             .keys()
             .into_iter()
             .map(|key| (key.to_string(), Vec::new()))
-            .collect(); 
-        
+            .collect();
+
         // Test each row: if it pases, shallow-clone the tensors into filtered tensors
         for i in 0..self.len() {
-            let row = self.get_row(i).ok_or_else(||{
-                DataPrepError::InconsistentTensorList(format!("Failed to access row at index {}", i))
+            let row = self.get_row(i).ok_or_else(|| {
+                DataPrepError::InconsistentTensorList(format!(
+                    "Failed to access row at index {}",
+                    i
+                ))
             })?;
             if f(&row) {
                 for (key, tensor) in row {
@@ -413,105 +413,105 @@ impl SafetensorsDataset {
                 }
             }
         }
-        // Note: 
-        // `from_dict` enforces dtype consistency for non-empty lists. 
-        // If all rows are filtered out, some lists may remain empty. 
-        // We allow that here for now. 
+        // Note:
+        // `from_dict` enforces dtype consistency for non-empty lists.
+        // If all rows are filtered out, some lists may remain empty.
+        // We allow that here for now.
         Self::from_dict(filtered_tensors)
     }
 
     /// Applies a transformation function to each row, returning a new `SafetensorsDataset`
-    /// 
-    /// The function `f` is called with `(row_index, row_map)`, where 
-    /// - `row_index` is the 0-based index of the row, 
-    /// - `row_map` is the key -> &Tensor map. 
-    /// 
+    ///
+    /// The function `f` is called with `(row_index, row_map)`, where
+    /// - `row_index` is the 0-based index of the row,
+    /// - `row_map` is the key -> &Tensor map.
+    ///
     /// `f` must return a map of the same keys with the new (shallow) `Tensor`s.
-    /// - The shape and dtype of the new tensors must be consistent (all rows must match 
-    ///   dtypes for a given key). 
-    /// 
-    /// # Errors 
+    /// - The shape and dtype of the new tensors must be consistent (all rows must match
+    ///   dtypes for a given key).
+    ///
+    /// # Errors
     /// - Returns `DataPrepError::InvalidKey` if `f` produces a key not in the original dataset.
     /// - Returns `DataPrepError::InconsistentTensorList` if different rows produce different dtypes.
     ///
-    /// # Example 
+    /// # Example
     /// ```rust
-    /// # use data_preparation::SafetensorsDataset; 
-    /// # use tch::{Tensor, Kind}; 
-    /// # use std::collections::HashMap; 
-    /// 
+    /// # use data_preparation::SafetensorsDataset;
+    /// # use tch::{Tensor, Kind};
+    /// # use std::collections::HashMap;
+    ///
     /// // Our original dataset has two keys: 'x' and 'y'.
-    /// // Each has two rows: [1, 2] for x, [10, 20] for y. 
+    /// // Each has two rows: [1, 2] for x, [10, 20] for y.
     /// let dataset = SafetensorsDataset::from_dict(HashMap::from([
     ///     ("x".to_string(), vec![Tensor::from(1), Tensor::from(2)]),
     ///     ("y".to_string(), vec![Tensor::from(10), Tensor::from(20)])
-    /// ])).unwrap(); 
-    /// 
-    /// // We want to combine 'x' and 'y' for each row, and also update 'y': 
-    /// // x_new = x + y 
-    /// // y_new = y*2 
+    /// ])).unwrap();
+    ///
+    /// // We want to combine 'x' and 'y' for each row, and also update 'y':
+    /// // x_new = x + y
+    /// // y_new = y*2
     /// let mapped = dataset.map(|_row_index, row| {
     ///     let x_val = row["x"].int64_value(&[]);
     ///     let y_val = row["y"].int64_value(&[]);
-    ///     
+    ///
     ///     HashMap::from([
     ///         ("x".to_string(), Tensor::from(x_val + y_val)),
     ///         ("y".to_string(), Tensor::from(y_val * 2)),
     ///     ])
     /// }).unwrap();
-    /// 
-    /// // Now the new dataset has the same keys ('x' and 'y'), but transformed values: 
+    ///
+    /// // Now the new dataset has the same keys ('x' and 'y'), but transformed values:
     /// // x-> [11, 22] and y -> [20, 40].
-    /// 
+    ///
     /// let row0 = mapped.get_row(0).unwrap();
     /// assert_eq!(row0["x"].int64_value(&[]), 11);
     /// assert_eq!(row0["y"].int64_value(&[]), 20);
-    /// let row1 = mapped.get_row(1).unwrap(); 
+    /// let row1 = mapped.get_row(1).unwrap();
     /// assert_eq!(row1["x"].int64_value(&[]), 22);
     /// assert_eq!(row1["y"].int64_value(&[]), 40);
     /// ```
-    pub fn map<F>(&self, f:F) -> Result<Self>
-    where 
-        F: Fn(usize, &HashMap<String, &Tensor>) -> HashMap<String, Tensor>, 
+    pub fn map<F>(&self, f: F) -> Result<Self>
+    where
+        F: Fn(usize, &HashMap<String, &Tensor>) -> HashMap<String, Tensor>,
     {
-        let len = self.len(); 
+        let len = self.len();
         if len == 0 {
-            // Return an empty dataset with the same keys. 
-            let mut empty_tensors = HashMap::new(); 
+            // Return an empty dataset with the same keys.
+            let mut empty_tensors = HashMap::new();
             for key in self.keys() {
                 empty_tensors.insert(key.to_string(), Vec::new());
             }
             return Ok(Self {
                 dataset: Dataset::new(empty_tensors),
-            });   
+            });
         }
 
-        let mut transformed_tensors: HashMap<String, Vec<Tensor>> = HashMap::new(); 
+        let mut transformed_tensors: HashMap<String, Vec<Tensor>> = HashMap::new();
         for key in self.keys() {
             transformed_tensors.insert(key.to_string(), Vec::with_capacity(len));
         }
 
         // Apply the transformation function to each row
         for i in 0..len {
-            let row = self.get_row(i)
-                .ok_or_else(|| {
-                    DataPrepError::InconsistentTensorList(format!(
-                        "Failed to access row at index {}", i
-                    ))
-                })?;
+            let row = self.get_row(i).ok_or_else(|| {
+                DataPrepError::InconsistentTensorList(format!(
+                    "Failed to access row at index {}",
+                    i
+                ))
+            })?;
             let transformed_row = f(i, &row);
 
-            // Check that the transformed row matches the original key set. 
+            // Check that the transformed row matches the original key set.
             if transformed_row.len() != row.len() {
                 return Err(DataPrepError::InvalidKey(format!(
                     "Transformation at index {} produced a row with {} keys, expected {}.",
-                    i, 
-                    transformed_row.len(), 
+                    i,
+                    transformed_row.len(),
                     row.len()
                 )));
             }
 
-            // Insert each transformed tensor into the new map, ensuring dtype consistency 
+            // Insert each transformed tensor into the new map, ensuring dtype consistency
             for (key, tensor) in transformed_row {
                 if !self.contains_key(&key) {
                     return Err(DataPrepError::InvalidKey(format!(
@@ -519,14 +519,14 @@ impl SafetensorsDataset {
                         i, key
                     )));
                 }
-                let existing_list = transformed_tensors.get_mut(&key).unwrap(); 
-                // If there is already data for this key, ensure dtype matches. 
+                let existing_list = transformed_tensors.get_mut(&key).unwrap();
+                // If there is already data for this key, ensure dtype matches.
                 if !existing_list.is_empty() && tensor.kind() != existing_list[0].kind() {
                     return Err(DataPrepError::InconsistentTensorList(format!(
                         "Transformation at index {} produced a tensor with dtype {:?} for key '{}', expected dtype {:?}",
-                        i, 
-                        tensor.kind(), 
-                        key, 
+                        i,
+                        tensor.kind(),
+                        key,
                         existing_list[0].kind()
                     )));
                 }
@@ -534,13 +534,13 @@ impl SafetensorsDataset {
             }
         }
 
-        // Each key's length should match the dataset length now. 
+        // Each key's length should match the dataset length now.
         for (key, tensors) in &transformed_tensors {
             if tensors.len() != len {
                 return Err(DataPrepError::InconsistentTensorList(format!(
-                    "Transformation produced {} tensors for key '{}', expected {}. ", 
-                    tensors.len(), 
-                    key, 
+                    "Transformation produced {} tensors for key '{}', expected {}. ",
+                    tensors.len(),
+                    key,
                     len
                 )));
             }
@@ -574,36 +574,39 @@ impl SafetensorsDataset {
     /// assert!(!dataset.contains_key("old"));
     /// ```
     pub fn rename(&mut self, key_mapping: &[(String, String)]) -> Result<()> {
-        // Detect duplicates in the new keys. 
-        let mut new_keys = HashSet::new(); 
+        // Detect duplicates in the new keys.
+        let mut new_keys = HashSet::new();
         for (_, new_key) in key_mapping {
             if !new_keys.insert(new_key) {
                 return Err(DataPrepError::InvalidKey(format!(
-                    "Duplicate new key '{}' in key mapping", new_key
+                    "Duplicate new key '{}' in key mapping",
+                    new_key
                 )));
             }
         }
 
         // Gather the sets of old and new keys.
-        let current_keys: HashSet<&String> = self.dataset.tensors.keys().collect(); 
+        let current_keys: HashSet<&String> = self.dataset.tensors.keys().collect();
         let old_keys: HashSet<&String> = key_mapping.iter().map(|(old, _)| old).collect();
-        let new_keys: HashSet<&String> = key_mapping.iter().map(|(_, new)| new).collect(); 
+        let new_keys: HashSet<&String> = key_mapping.iter().map(|(_, new)| new).collect();
 
         // Check that all old keys exist in the dataset.
         for old_key in &old_keys {
             if !current_keys.contains(old_key) {
                 return Err(DataPrepError::InvalidKey(format!(
-                    "Key '{}' to rename does not exist in the dataset", old_key
+                    "Key '{}' to rename does not exist in the dataset",
+                    old_key
                 )));
             }
         }
 
         // Check for collisions: a new key that already exists but is not being replaced.
-        let keys_to_remove: HashSet<&String> = old_keys; 
+        let keys_to_remove: HashSet<&String> = old_keys;
         for new_key in &new_keys {
             if current_keys.contains(new_key) && !keys_to_remove.contains(new_key) {
                 return Err(DataPrepError::InvalidKey(format!(
-                    "New key '{}' already exists in the dataset and is not being renamed", new_key
+                    "New key '{}' already exists in the dataset and is not being renamed",
+                    new_key
                 )));
             }
         }
@@ -618,7 +621,7 @@ impl SafetensorsDataset {
                 .unwrap_or(old_key);
             new_tensors.insert(new_key, tensor_list);
         }
-        self.dataset.tensors = new_tensors; 
+        self.dataset.tensors = new_tensors;
 
         Ok(())
     }
@@ -636,11 +639,11 @@ impl SafetensorsDataset {
     // Metadata & I/O
     // ---------------------------------------------------------------------------------------
 
-    /// Returns metadata about the dataset's structure, including 
+    /// Returns metadata about the dataset's structure, including
     /// - The number of rows (`len`),
-    /// - A map from each key to its `TensorLayout`. 
-    /// 
-    /// # Example 
+    /// - A map from each key to its `TensorLayout`.
+    ///
+    /// # Example
     /// ``` rust
     /// use data_preparation::SafetensorsDataset;
     /// use tch::Tensor;
@@ -654,48 +657,48 @@ impl SafetensorsDataset {
     /// println!("{:?}", info);
     /// ```
     pub fn info(&self) -> DatasetInfo {
-        let len = self.len(); 
-        let mut layouts = HashMap::new(); 
+        let len = self.len();
+        let mut layouts = HashMap::new();
 
         for (key, tensors) in &self.dataset.tensors {
             if tensors.is_empty() {
-                // This might be rare unless user called `empty(...)` or mutated 
+                // This might be rare unless user called `empty(...)` or mutated
                 // the dataset directly, given that from_dict enforces non-empty
                 layouts.insert(key.clone(), TensorLayout::VaryingDtype);
-                continue; 
+                continue;
             }
             let first_tensor = &tensors[0];
-            let first_shape = first_tensor.size(); 
-            let first_dtype = first_tensor.kind(); 
+            let first_shape = first_tensor.size();
+            let first_dtype = first_tensor.kind();
 
             let mut all_same_shape = true;
             let mut all_same_dtype = true;
 
             for tensor in tensors.iter().skip(1) {
                 if tensor.kind() != first_dtype {
-                    all_same_dtype = false;  
+                    all_same_dtype = false;
                 }
                 if tensor.size() != first_shape {
-                    all_same_shape = false; 
+                    all_same_shape = false;
                 }
                 if !all_same_dtype && !all_same_shape {
-                    break; 
+                    break;
                 }
             }
 
             let layout = if !all_same_dtype {
                 TensorLayout::VaryingDtype
             } else if !all_same_shape {
-                TensorLayout::VaryingDimSize {dtype: first_dtype}
+                TensorLayout::VaryingDimSize { dtype: first_dtype }
             } else {
                 TensorLayout::Standard {
-                    shape: first_shape, 
+                    shape: first_shape,
                     dtype: first_dtype,
                 }
-            }; 
+            };
             layouts.insert(key.clone(), layout);
         }
-        DatasetInfo{len, layouts}
+        DatasetInfo { len, layouts }
     }
 
     /// Saves the dataset to a `.safetensors` file on disk.
@@ -707,7 +710,7 @@ impl SafetensorsDataset {
     ///
     /// # Errors
     /// - `DataPrepError::InvalidKey` if any key contains the character `'.'`.
-    /// - `DataPrepError::UnsupportedDtype` if a tensor’s dtype is not yet
+    /// - `DataPrepError::UnsupportedDtype` if a tensor’s dtype is not ye
     ///   supported (e.g., `F16`).
     /// - `DataPrepError::FileFormat` or `DataPrepError::Other` on I/O failures,
     ///   JSON issues, etc.
@@ -725,70 +728,72 @@ impl SafetensorsDataset {
     /// ds.save_to_file("my_dataset.safetensors").unwrap();
     /// ```
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let mut tensor_data_map: HashMap<String, (Dtype, Vec<usize>, Vec<u8>)> = HashMap::new(); 
-        let mut metadata: HashMap<String, String> = HashMap::new(); // Values must be string 
+        let mut tensor_data_map: HashMap<String, (Dtype, Vec<usize>, Vec<u8>)> = HashMap::new();
+        let mut metadata: HashMap<String, String> = HashMap::new(); // Values must be string
 
         // Store total dataset size in metadata
         metadata.insert(
-            "size".to_string(), 
-            serde_json::to_string(&self.dataset.len())? 
+            "size".to_string(),
+            serde_json::to_string(&self.dataset.len())?,
         );
 
         for (key, tensor_list) in &self.dataset.tensors {
             // Keys cannot contain '.' (conflicts with safetensors naming)
             if key.contains('.') {
                 return Err(DataPrepError::InvalidKey(format!(
-                    "'.' is not allowed in key '{}'", key
+                    "'.' is not allowed in key '{}'",
+                    key
                 )));
             }
 
             if tensor_list.is_empty() {
-                // This case might be unreachable if from_dict enforces non-empty lists. But, 
-                // TODO: how to represent empty list metadata. 
-                // For now, skip saving tensors and metadata for empty lists. 
-                continue; 
+                // This case might be unreachable if from_dict enforces non-empty lists. But,
+                // TODO: how to represent empty list metadata.
+                // For now, skip saving tensors and metadata for empty lists.
+                continue;
             }
 
-            // Determine dtype for this list 
-            let list_kind = tensor_list[0].kind(); 
+            // Determine dtype for this lis
+            let list_kind = tensor_list[0].kind();
             let (safetensor_dtype, dtype_str) = match list_kind {
-                Kind::Float => (Dtype::F32, "F32"), 
+                Kind::Float => (Dtype::F32, "F32"),
                 Kind::Double => (Dtype::F64, "F64"),
                 Kind::Int64 => (Dtype::I64, "I64"),
-                Kind::Int => (Dtype::I32, "I32"), 
+                Kind::Int => (Dtype::I32, "I32"),
                 Kind::Int8 => (Dtype::I8, "I8"),
                 Kind::Uint8 => (Dtype::U8, "U8"),
                 Kind::Bool => (Dtype::BOOL, "BOOL"),
-                // TODO: Add F16, and BF16 here 
-                _ => return Err(DataPrepError::UnsupportedDtype(format!(
-                    "Dtype {:?} in list for key '{}' is not supported for saving.",  
-                    list_kind, key
-                )))
+                // TODO: Add F16, and BF16 here
+                _ => {
+                    return Err(DataPrepError::UnsupportedDtype(format!(
+                        "Dtype {:?} in list for key '{}' is not supported for saving.",
+                        list_kind, key
+                    )))
+                }
             };
-
 
             // Serialize each tensor in the vector as key.index
             for (i, tensor) in tensor_list.iter().enumerate() {
                 if tensor.kind() != list_kind {
                     return Err(DataPrepError::InconsistentTensorList(format!(
                         "Inconsistent dtypes in list for key '{}': expected {:?}, found {:?} at index {}",
-                        key, 
-                        list_kind, 
-                        tensor.kind(), 
+                        key,
+                        list_kind,
+                        tensor.kind(),
                         i
                     )));
-                } 
+                }
 
-                let tensor_key = format!("{}.{}", key, i); 
-                let num_elements = tensor.numel(); 
-                let shape: Vec<usize> = tensor.size().iter().map(|&x| x as usize).collect(); 
+                let tensor_key = format!("{}.{}", key, i);
+                let num_elements = tensor.numel();
+                let shape: Vec<usize> = tensor.size().iter().map(|&x| x as usize).collect();
 
-                // Flatten the data to bytes in little-endian form. 
+                // Flatten the data to bytes in little-endian form.
                 let bytes: Vec<u8> = match list_kind {
                     Kind::Float => {
                         let mut data = vec![0.0f32; num_elements];
                         tensor.copy_data(&mut data, num_elements);
-                        data.into_iter().flat_map(|x|x.to_le_bytes()).collect()
+                        data.into_iter().flat_map(|x| x.to_le_bytes()).collect()
                     }
                     Kind::Double => {
                         let mut data = vec![0.0f64; num_elements];
@@ -798,7 +803,7 @@ impl SafetensorsDataset {
                     Kind::Int64 => {
                         let mut data = vec![0i64; num_elements];
                         tensor.copy_data(&mut data, num_elements);
-                        data.into_iter().flat_map(|x|x.to_le_bytes()).collect()
+                        data.into_iter().flat_map(|x| x.to_le_bytes()).collect()
                     }
                     Kind::Int => {
                         let mut data = vec![0i32; num_elements];
@@ -821,7 +826,7 @@ impl SafetensorsDataset {
                         let byte_data: Vec<u8> = bool_data.into_iter().map(|b| b as u8).collect();
                         byte_data
                     }
-                    // This case is most likely unreachable due to the dtype check before the loop 
+                    // This case is most likely unreachable due to the dtype check before the loop
                     _ => unreachable!("Unsupported dtype checked earlier"),
                 };
 
@@ -835,10 +840,9 @@ impl SafetensorsDataset {
                 ("dtype", Value::String(dtype_str.to_string())),
             ]);
             metadata.insert(key.clone(), serde_json::to_string(&meta_map)?);
-        
-        } // End outer loop 
+        } // End outer loop
 
-        // Create tensor data into safetensors view 
+        // Create tensor data into safetensors view
         let tensors_for_serialization: HashMap<String, TensorView> = tensor_data_map
             .iter()
             .map(|(name, (dt, shape, bytes))| {
@@ -849,9 +853,9 @@ impl SafetensorsDataset {
             .collect::<Result<_>>()?;
 
         // Serialize everything into bytes
-        let serialized = serialize(&tensors_for_serialization, &Some(metadata))?; 
+        let serialized = serialize(&tensors_for_serialization, &Some(metadata))?;
 
-        // Write to file 
+        // Write to file
         let mut file = File::create(path)?;
         file.write_all(&serialized)?;
         Ok(())
@@ -890,17 +894,21 @@ impl SafetensorsDataset {
         }
         let header_bytes = &buffer[8..header_end];
         let header_val: Value = serde_json::from_slice(header_bytes)?;
-        let top_level_metadata = header_val
-            .get("__metadata__")
-            .ok_or_else(|| DataPrepError::MetadataNotFound("__metadata__ section missing.".into()))?;
-        let top_level_map: HashMap<String, Value> = serde_json::from_value(top_level_metadata.clone())?;
+        let top_level_metadata = header_val.get("__metadata__").ok_or_else(|| {
+            DataPrepError::MetadataNotFound("__metadata__ section missing.".into())
+        })?;
+        let top_level_map: HashMap<String, Value> =
+            serde_json::from_value(top_level_metadata.clone())?;
 
         // Group tensor keys by base key (e.g. "mykey.0", "mykey.1" -> "mykey").
         let mut grouped_keys: HashMap<String, Vec<String>> = HashMap::new();
         for name in safetensor_views.names() {
             if let Some((base_key, index_str)) = name.rsplit_once('.') {
                 if index_str.parse::<usize>().is_ok() {
-                    grouped_keys.entry(base_key.to_string()).or_default().push(name.clone());
+                    grouped_keys
+                        .entry(base_key.to_string())
+                        .or_default()
+                        .push(name.clone());
                 }
             }
         }
@@ -920,28 +928,46 @@ impl SafetensorsDataset {
             let meta_str = top_level_map
                 .get(&base_key)
                 .ok_or_else(|| {
-                    DataPrepError::MetadataNotFound(format!("No metadata found for key '{}'.", base_key))
+                    DataPrepError::MetadataNotFound(format!(
+                        "No metadata found for key '{}'.",
+                        base_key
+                    ))
                 })?
                 .as_str()
                 .ok_or_else(|| {
-                    DataPrepError::MetadataFormat(format!("Metadata for key '{}' is not a string.", base_key))
+                    DataPrepError::MetadataFormat(format!(
+                        "Metadata for key '{}' is not a string.",
+                        base_key
+                    ))
                 })?;
 
             let list_meta: HashMap<String, Value> = serde_json::from_str(meta_str)?;
-            let is_list = list_meta.get("list")
+            let is_list = list_meta
+                .get("list")
                 .and_then(|v| v.as_bool())
                 .ok_or_else(|| {
-                    DataPrepError::MetadataFormat(format!("'list' boolean missing for '{}'.", base_key))
+                    DataPrepError::MetadataFormat(format!(
+                        "'list' boolean missing for '{}'.",
+                        base_key
+                    ))
                 })?;
-            let numel = list_meta.get("numel")
+            let numel = list_meta
+                .get("numel")
                 .and_then(|v| v.as_u64())
                 .ok_or_else(|| {
-                    DataPrepError::MetadataFormat(format!("'numel' missing or invalid for '{}'.", base_key))
+                    DataPrepError::MetadataFormat(format!(
+                        "'numel' missing or invalid for '{}'.",
+                        base_key
+                    ))
                 })? as usize;
-            let dtype_str = list_meta.get("dtype")
+            let dtype_str = list_meta
+                .get("dtype")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| {
-                    DataPrepError::MetadataFormat(format!("'dtype' missing or invalid for '{}'.", base_key))
+                    DataPrepError::MetadataFormat(format!(
+                        "'dtype' missing or invalid for '{}'.",
+                        base_key
+                    ))
                 })?;
 
             if !is_list {
@@ -952,7 +978,9 @@ impl SafetensorsDataset {
             if numel != suffix_keys.len() {
                 return Err(DataPrepError::FileFormat(format!(
                     "Metadata says key '{}' has {} tensors, but found {}.",
-                    base_key, numel, suffix_keys.len()
+                    base_key,
+                    numel,
+                    suffix_keys.len()
                 )));
             }
 
@@ -966,11 +994,14 @@ impl SafetensorsDataset {
                 // Helper to shape a Tensor from raw bytes with the correct type.
                 let t = match dtype_str {
                     "F32" => {
-                        let expected_bytes = shape.iter().product::<usize>() * std::mem::size_of::<f32>();
+                        let expected_bytes =
+                            shape.iter().product::<usize>() * std::mem::size_of::<f32>();
                         if raw_data.len() != expected_bytes {
                             return Err(DataPrepError::FileFormat(format!(
                                 "Incorrect byte size for F32 '{}' ({} vs expected {}).",
-                                tensor_name, raw_data.len(), expected_bytes
+                                tensor_name,
+                                raw_data.len(),
+                                expected_bytes
                             )));
                         }
                         let floats: Vec<f32> = raw_data
@@ -981,10 +1012,12 @@ impl SafetensorsDataset {
                             .reshape(&shape.iter().map(|&d| d as i64).collect::<Vec<_>>())
                     }
                     "F64" => {
-                        let expected_bytes = shape.iter().product::<usize>() * std::mem::size_of::<f64>();
+                        let expected_bytes =
+                            shape.iter().product::<usize>() * std::mem::size_of::<f64>();
                         if raw_data.len() != expected_bytes {
                             return Err(DataPrepError::FileFormat(format!(
-                                "Incorrect byte size for F64 '{}'.", tensor_name
+                                "Incorrect byte size for F64 '{}'.",
+                                tensor_name
                             )));
                         }
                         let doubles: Vec<f64> = raw_data
@@ -997,7 +1030,8 @@ impl SafetensorsDataset {
                     "I8" => {
                         if raw_data.len() != shape.iter().product::<usize>() {
                             return Err(DataPrepError::FileFormat(format!(
-                                "Incorrect byte size for I8 '{}'.", tensor_name
+                                "Incorrect byte size for I8 '{}'.",
+                                tensor_name
                             )));
                         }
                         let i8_data: Vec<i8> = raw_data.iter().map(|&b| b as i8).collect();
@@ -1005,10 +1039,12 @@ impl SafetensorsDataset {
                             .reshape(&shape.iter().map(|&d| d as i64).collect::<Vec<_>>())
                     }
                     "I32" => {
-                        let expected_bytes = shape.iter().product::<usize>() * std::mem::size_of::<i32>();
+                        let expected_bytes =
+                            shape.iter().product::<usize>() * std::mem::size_of::<i32>();
                         if raw_data.len() != expected_bytes {
                             return Err(DataPrepError::FileFormat(format!(
-                                "Incorrect byte size for I32 '{}'.", tensor_name
+                                "Incorrect byte size for I32 '{}'.",
+                                tensor_name
                             )));
                         }
                         let i32_data: Vec<i32> = raw_data
@@ -1019,10 +1055,12 @@ impl SafetensorsDataset {
                             .reshape(&shape.iter().map(|&d| d as i64).collect::<Vec<_>>())
                     }
                     "I64" => {
-                        let expected_bytes = shape.iter().product::<usize>() * std::mem::size_of::<i64>();
+                        let expected_bytes =
+                            shape.iter().product::<usize>() * std::mem::size_of::<i64>();
                         if raw_data.len() != expected_bytes {
                             return Err(DataPrepError::FileFormat(format!(
-                                "Incorrect byte size for I64 '{}'.", tensor_name
+                                "Incorrect byte size for I64 '{}'.",
+                                tensor_name
                             )));
                         }
                         let i64_data: Vec<i64> = raw_data
@@ -1033,10 +1071,12 @@ impl SafetensorsDataset {
                             .reshape(&shape.iter().map(|&d| d as i64).collect::<Vec<_>>())
                     }
                     "U8" => {
-                        let expected_bytes = shape.iter().product::<usize>() * std::mem::size_of::<u8>();
+                        let expected_bytes =
+                            shape.iter().product::<usize>() * std::mem::size_of::<u8>();
                         if raw_data.len() != expected_bytes {
                             return Err(DataPrepError::FileFormat(format!(
-                                "Incorrect byte size for U8 '{}'.", tensor_name
+                                "Incorrect byte size for U8 '{}'.",
+                                tensor_name
                             )));
                         }
                         let u8_data = raw_data.to_vec();
@@ -1045,10 +1085,12 @@ impl SafetensorsDataset {
                             .to_kind(Kind::Uint8)
                     }
                     "BOOL" => {
-                        let expected_bytes = shape.iter().product::<usize>() * std::mem::size_of::<u8>();
+                        let expected_bytes =
+                            shape.iter().product::<usize>() * std::mem::size_of::<u8>();
                         if raw_data.len() != expected_bytes {
                             return Err(DataPrepError::FileFormat(format!(
-                                "Incorrect byte size for BOOL '{}'.", tensor_name
+                                "Incorrect byte size for BOOL '{}'.",
+                                tensor_name
                             )));
                         }
                         let bool_data: Vec<u8> = raw_data.to_vec();
