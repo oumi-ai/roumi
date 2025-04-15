@@ -2,6 +2,28 @@ use anyhow::{bail, Result};
 use std::collections::HashMap;
 use tch::Tensor;
 
+/// The `Dataset` struct serves as a container for machine learning data,
+/// storing a full batch of samples as tensors.
+///
+/// Data is organized in a `HashMap` where:
+/// - Keys are feature names (e.g., "tokens", "labels")
+/// - Values are tensors with shape `[batch_size,...]`
+///
+/// For example:
+/// ```text
+/// Batch of 4 samples:
+/// {
+///     "tokens": Tensor([4, 128])   //4 sequences, 128 tokens each
+///     "labels": Tensor([4])       //4 corresponding labels
+/// }
+/// ```
+///
+/// **Notes:**
+/// 1. All tensors must share the same `batch_size` (first dimension).
+/// 2. For single examples, use `batch_size = 1`.
+/// 3. The batch size here refers to the total samples stored. During
+///    training/inference, this batch can be split into smaller mini-
+///    batches. *(Implementation note: Mini-batch splitting for future work.)*
 #[derive(Debug)]
 pub struct Dataset {
     tensors: HashMap<String, Tensor>,
@@ -68,7 +90,7 @@ impl Dataset {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tch::{Kind, Tensor}; 
+    use tch::{Kind, Tensor};
 
     #[test]
     fn test_accept_1d_batch_tensor() {
@@ -134,7 +156,7 @@ mod tests {
             .map(|seq| Tensor::from_slice(&seq).to_kind(Kind::Int))
             .collect();
 
-        let result = Tensor::f_stack(&tensors, 0); // Should fail. 
+        let result = Tensor::f_stack(&tensors, 0); // Should fail.
 
         match result {
             Ok(t) => {
