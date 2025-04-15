@@ -1,3 +1,4 @@
+use anyhow::{bail, Result};
 use std::collections::HashMap;
 use tch::Tensor;
 
@@ -11,7 +12,7 @@ impl Dataset {
     /// Validates that:
     /// - No tensors are scalar (must have at least one dimension).
     /// - All tensors share the same size for the first dimension (batch size).
-    pub fn new(tensors: HashMap<String, Tensor>) -> Result<Self, String> {
+    pub fn new(tensors: HashMap<String, Tensor>) -> Result<Self> {
         if tensors.is_empty() {
             return Ok(Dataset { tensors });
         }
@@ -22,23 +23,24 @@ impl Dataset {
             .map(|(key, t)| {
                 let size = t.size();
                 if size.is_empty() {
-                    Err(format!(
+                    bail!(
                         "Scalar tensor '{}' not allowed; tensors must have a batch dimension (e.g., [batch_size], [batch_size, seq_len])",
                         key
-                    ))
+                    )
                 } else {
                     Ok(size[0] as usize)
                 }
             })
-            .collect::<Result<Vec<usize>, String>>()?;
+            .collect::<Result<Vec<usize>>>()?;
 
         // Ensure the batch size is consistent
         let first_batch_size = batch_sizes[0];
         if !batch_sizes.iter().all(|&size| size == first_batch_size) {
-            return Err(format!(
+            bail!(
                 "Inconsistent batch sizes: expected {}, found {:?}",
-                first_batch_size, batch_sizes
-            ));
+                first_batch_size,
+                batch_sizes
+            );
         }
 
         Ok(Dataset { tensors })

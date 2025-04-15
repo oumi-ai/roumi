@@ -9,3 +9,4 @@ description.workspace = true
 
 [dependencies]
 tch = "0.15.0"
+anyhow = "1.0"
