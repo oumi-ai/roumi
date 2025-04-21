@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Result};
-use std::collections::HashMap;
-use tch::Tensor;
+use std::collections::{HashMap, HashSet};
+use tch::{Device, Tensor};
 
 /// The `Sample` struct represents a single data example in a machine learning pipeline.
 ///
@@ -95,174 +95,185 @@ mod sample_test {
     }
 }
 
-/// The `MiniBatch` struct serves as a container for machine learning data,
-/// storing a full batch of samples as tensors.
+/// The `MiniBatch` struct represents a batch of data examples grouped for model input.
 ///
-/// Data is organized in a `HashMap` where:
-/// - Keys are feature names (e.g., "tokens", "labels")
-/// - Values are tensors with shape `[batch_size,...]`
+/// It is constructed by stacking multiple [`Sample`]s together along the
+/// batch dimension (dim 0). Internally, it holds a map from feature names
+/// (e.g., `"input_ids"`, `"labels"`) to batched tensors.
 ///
-/// For example:
-/// ```text
-/// Batch of 4 samples:
-/// {
-///     "tokens": Tensor([4, 128])   //4 sequences, 128 tokens each
-///     "labels": Tensor([4])       //4 corresponding labels
-/// }
-/// ```
+/// Each tensor in the map has shape `[batch_size, ...]`, where:
+/// - `batch_size` = number of samples in the batch
+/// - Remaining dimensions must match across all samples for stacking.
 ///
-/// **Notes:**
-/// 1. All tensors must share the same `batch_size` (first dimension).
-/// 2. For single examples, use `batch_size = 1`.
-/// 3. The batch size here refers to the total samples stored. During
-///    training/inference, this batch can be split into smaller mini-
-///    batches. *(Implementation note: Mini-batch splitting for future work.)*
+/// # Examples
+/// Suppose we have 4 `Samples` and each 'Sample' contains the following features:
+/// - `"input_ids"` -> shape `[128]` (tokenized sequence)
+/// - `"pixel_values"` -> shape `[3, 224, 224]` (RGB image)
+///
+/// Then the resulting `MiniBatch` will contain:
+/// - `"input_ids"` -> shape `[4, 128]`
+/// - `"pixel_values"` -> shape `[4, 3, 224, 224]`
 #[derive(Debug)]
 pub struct MiniBatch {
     tensors: HashMap<String, Tensor>,
 }
 
 impl MiniBatch {
-    /// Creates a new MiniBatch from a HashMap of tensors.
-    /// Validates that:
-    /// - No tensors are scalar (must have at least one dimension).
-    /// - All tensors share the same size for the first dimension (batch size).
-    pub fn new(tensors: HashMap<String, Tensor>) -> Result<Self> {
-        if tensors.is_empty() {
-            return Ok(MiniBatch { tensors });
+    /// Constructs a `MiniBatch` from a list of individual [`Sample`]s.
+    ///
+    /// This stacks the tensors from each sample along the batch dimension,
+    /// producing one batched tensor per feature.
+    ///
+    /// # Validation checks:
+    /// - All `Sample`s must contain the same set of feature keys.
+    /// - For each feature key, the associated tensors must have the same
+    ///   shape across samples to be stackable.
+    pub fn from_samples(samples: Vec<Sample>) -> Result<Self> {
+        if samples.is_empty() {
+            return Err(anyhow!("Cannot create mini-batch from empty sample list"));
         }
 
-        // Check for scalars
-        let batch_sizes: Vec<usize> = tensors
-            .iter()
-            .map(|(key, t)| {
-                let size = t.size();
-                if size.is_empty() {
+        // Use the first sample to extract the expected set of feature keys
+        let expected_keys: HashSet<&String> = samples[0].features.keys().collect();
+
+        // Ensure all samples have the same keys
+        if samples[1..].iter().any(|s| {
+            s.features.len() != expected_keys.len()
+                || !s.features.keys().all(|k| expected_keys.contains(k))
+        }) {
+            bail!("Mismatched feature keys across samples");
+        }
+
+        // Stack tensors for each feature
+        let mut tensors = HashMap::with_capacity(expected_keys.len());
+        for key in expected_keys {
+            // Gather tensor references for this feature across all samples
+            let tensors_to_stack: Vec<&Tensor> = samples
+                .iter()
+                .map(|s| s.features.get(key).expect("Validated key"))
+                .collect();
+
+            // Validate that tensor shapes are compatabile for stacking
+            let reference_shape = tensors_to_stack[0].size();
+            for (i, tensor) in tensors_to_stack.iter().enumerate() {
+                if tensor.size() != reference_shape {
                     bail!(
-                        "Scalar tensor '{}' not allowed; tensors must have a batch dimension (e.g., [batch_size], [batch_size, seq_len])",
-                        key
-                    )
-                } else {
-                    Ok(size[0] as usize)
+                        "Shape mismatch in sample {} for feature '{}': expected {:?}, got {:?}",
+                        i,
+                        key,
+                        reference_shape,
+                        tensor.size()
+                    );
                 }
-            })
-            .collect::<Result<Vec<usize>>>()?;
+            }
 
-        // Ensure the batch size is consistent
-        let first_batch_size = batch_sizes[0];
-        if !batch_sizes.iter().all(|&size| size == first_batch_size) {
-            bail!(
-                "Inconsistent batch sizes: expected {}, found {:?}",
-                first_batch_size,
-                batch_sizes
-            );
+            // Stack along dimension 0 to form the batched tensor.
+            // Shape validation check above ensures that this call is safe.
+            let stacked = Tensor::stack(&tensors_to_stack, 0);
+            tensors.insert(key.clone(), stacked);
         }
-
-        Ok(MiniBatch { tensors })
+        Ok(Self { tensors })
     }
 
     /// Returns the number of samples in the batch.
-    pub fn len(&self) -> usize {
+    pub fn batch_size(&self) -> Result<i64> {
         self.tensors
             .values()
             .next()
-            .map_or(0, |t| t.size()[0] as usize)
+            .map(|t| t.size()[0])
+            .ok_or(anyhow!("Empty mini-batch"))
     }
 
-    /// Checks if the MiniBatch contains no tensors
-    pub fn is_empty(&self) -> bool {
-        self.tensors.is_empty()
+    /// Returns a reference to the tensor for a given feature key.
+    pub fn get(&self, feature: &str) -> Result<&Tensor> {
+        self.tensors
+            .get(feature)
+            .ok_or_else(|| anyhow!("Feature '{}' not found in mini-batch", feature))
     }
 
-    /// Returns an immutable reference to a tensor by key, if it exists.
-    pub fn get(&self, key: &str) -> Option<&Tensor> {
-        self.tensors.get(key)
+    /// Returns an iterator over all feature keys in the batch.
+    pub fn features(&self) -> impl Iterator<Item = &str> {
+        self.tensors.keys().map(String::as_str)
+    }
+
+    /// Transfers all tensors to the target device (CPU/GPU)
+    pub fn to_device(&self, device: Device) -> Self {
+        Self {
+            tensors: self
+                .tensors
+                .iter()
+                .map(|(feature_name, tensor)| (feature_name.clone(), tensor.to_device(device)))
+                .collect(),
+        }
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod minibatch_test {
     use super::*;
-    use tch::{Kind, Tensor};
+    use anyhow::Result;
+    use tch::{Device, Kind, Tensor};
 
-    #[test]
-    fn test_accept_1d_batch_tensor() {
-        let tensor = Tensor::from_slice(&[1, 2, 3, 4]).to_kind(Kind::Int);
-        let mut data_map = HashMap::new();
-        data_map.insert("tensor".to_string(), tensor);
-
-        match MiniBatch::new(data_map) {
-            Ok(_mini_batch) => println!("Successfully created MiniBatch for 1D data."),
-            Err(e) => panic!("Error creating MiniBatch for 1D data: {}", e),
-        }
+    /// Helper function: Creates a sample with predictable values
+    fn make_sample(value: i64) -> Sample {
+        Sample::from_single(
+            "input_ids",
+            Tensor::from_slice(&[value]).to_kind(Kind::Int64),
+        )
+        .with_feature(
+            "labels",
+            Tensor::from_slice(&[value % 2]).to_kind(Kind::Int64),
+        )
+        .with_feature("mask", Tensor::ones(&[1], (Kind::Float, Device::Cpu)))
     }
 
     #[test]
-    fn test_accept_padded_variable_length_tensors() {
-        let max_length = 5;
-        let sequences = vec![
-            vec![1, 2, 3],
-            vec![4, 5, 6, 7, 8],
-            vec![9, 10, 11, 12],
-            vec![13, 14],
-        ];
+    fn test_minibatch_from_samples() -> Result<()> {
+        let samples = vec![make_sample(1), make_sample(2), make_sample(3)];
+        let batch = MiniBatch::from_samples(samples)?;
 
-        let mut padded_data = Vec::new();
-        for seq in sequences {
-            let mut padded_seq = seq;
-            padded_seq.extend(vec![0; max_length - padded_seq.len()]);
-            padded_data.extend(padded_seq);
+        assert_eq!(batch.batch_size()?, 3);
+
+        // Check all features are batched correctly
+        for feature in batch.features() {
+            assert_eq!(batch.get(feature)?.size(), &[3, 1]);
         }
 
-        let tensor = Tensor::from_slice(&padded_data)
-            .reshape(&[4, max_length as i64])
-            .to_kind(Kind::Int);
-
-        let mut data_map = HashMap::new();
-        data_map.insert("tensor".to_string(), tensor);
-
-        match MiniBatch::new(data_map) {
-            Ok(_mini_batch) => {
-                println!("Successfully created MiniBatch for variable-length data after applying zero-padding.");
-                println!("MiniBatch: {:?}", _mini_batch);
-            }
-            Err(e) => {
-                panic!(
-                    "Error creating MiniBatch for variable-length data even after zero-padding: {}",
-                    e
-                );
-            }
-        }
+        // Check correct values
+        let labels: Vec<i64> = batch.get("labels")?.squeeze_dim(1).try_into()?;
+        assert_eq!(labels, vec![1, 0, 1]);
+        Ok(())
     }
 
     #[test]
-    fn test_reject_unpadded_variable_length_tensors() {
-        let sequences = vec![
-            vec![1, 2, 3],
-            vec![4, 5, 6, 7, 8],
-            vec![9, 10, 11, 12],
-            vec![13, 14],
-        ];
+    fn test_minibatch_to_device() -> Result<()> {
+        let cpu_batch = MiniBatch::from_samples(vec![make_sample(9), make_sample(10)])?;
+        let target_device = Device::cuda_if_available();
+        let moved_batch = cpu_batch.to_device(target_device);
 
-        let tensors: Vec<Tensor> = sequences
-            .into_iter()
-            .map(|seq| Tensor::from_slice(&seq).to_kind(Kind::Int))
-            .collect();
-
-        let result = Tensor::f_stack(&tensors, 0); // Should fail.
-
-        match result {
-            Ok(t) => {
-                let mut data_map = HashMap::new();
-                data_map.insert("tokens".to_string(), t);
-                match MiniBatch::new(data_map) {
-                    Ok(_) => panic!("Expected MiniBatch::new to fail due to inconsistent shapes, but it succeeded."),
-                    Err(e) => println!("Correctly rejected by MiniBatch::new: {}", e),
-                }
-            }
-            Err(e) => {
-                println!("Correctly failed to stack variable-length tensors: {}", e);
-            }
+        for feature in moved_batch.features() {
+            assert_eq!(moved_batch.get(feature)?.device(), target_device);
+            assert_eq!(cpu_batch.get(feature)?.device(), Device::Cpu);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_minibatch_shape_mismatch() {
+        let empty = MiniBatch::from_samples(vec![]);
+        assert!(empty.is_err());
+
+        let s1 = Sample::from_single("input_ids", Tensor::zeros(&[2], (Kind::Float, Device::Cpu)));
+        let s2 = Sample::from_single("input_ids", Tensor::zeros(&[3], (Kind::Float, Device::Cpu)));
+        let result = MiniBatch::from_samples(vec![s1, s2]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_minibatch_key_mismatch() {
+        let s1 = Sample::from_single("input_ids", Tensor::from_slice(&[1]));
+        let s2 = Sample::from_single("labels", Tensor::from_slice(&[0]));
+        let result = MiniBatch::from_samples(vec![s1, s2]);
+        assert!(result.is_err());
     }
 }
