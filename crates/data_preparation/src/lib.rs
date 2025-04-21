@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use std::collections::HashMap;
 use tch::Tensor;
 
-/// The `Dataset` struct serves as a container for machine learning data,
+/// The `MiniBatch` struct serves as a container for machine learning data,
 /// storing a full batch of samples as tensors.
 ///
 /// Data is organized in a `HashMap` where:
@@ -25,18 +25,18 @@ use tch::Tensor;
 ///    training/inference, this batch can be split into smaller mini-
 ///    batches. *(Implementation note: Mini-batch splitting for future work.)*
 #[derive(Debug)]
-pub struct Dataset {
+pub struct MiniBatch {
     tensors: HashMap<String, Tensor>,
 }
 
-impl Dataset {
-    /// Creates a new Dataset from a HashMap of tensors.
+impl MiniBatch {
+    /// Creates a new MiniBatch from a HashMap of tensors.
     /// Validates that:
     /// - No tensors are scalar (must have at least one dimension).
     /// - All tensors share the same size for the first dimension (batch size).
     pub fn new(tensors: HashMap<String, Tensor>) -> Result<Self> {
         if tensors.is_empty() {
-            return Ok(Dataset { tensors });
+            return Ok(MiniBatch { tensors });
         }
 
         // Check for scalars
@@ -65,7 +65,7 @@ impl Dataset {
             );
         }
 
-        Ok(Dataset { tensors })
+        Ok(MiniBatch { tensors })
     }
 
     /// Returns the number of samples in the batch.
@@ -76,7 +76,7 @@ impl Dataset {
             .map_or(0, |t| t.size()[0] as usize)
     }
 
-    /// Checks if the dataset contains no tensors
+    /// Checks if the MiniBatch contains no tensors
     pub fn is_empty(&self) -> bool {
         self.tensors.is_empty()
     }
@@ -98,9 +98,9 @@ mod tests {
         let mut data_map = HashMap::new();
         data_map.insert("tensor".to_string(), tensor);
 
-        match Dataset::new(data_map) {
-            Ok(_dataset) => println!("Successfully created dataset for 1D data."),
-            Err(e) => panic!("Error creating dataset for 1D data: {}", e),
+        match MiniBatch::new(data_map) {
+            Ok(_mini_batch) => println!("Successfully created MiniBatch for 1D data."),
+            Err(e) => panic!("Error creating MiniBatch for 1D data: {}", e),
         }
     }
 
@@ -128,14 +128,14 @@ mod tests {
         let mut data_map = HashMap::new();
         data_map.insert("tensor".to_string(), tensor);
 
-        match Dataset::new(data_map) {
-            Ok(dataset) => {
-                println!("Successfully created dataset for variable-length data after applying zero-padding.");
-                println!("Dataset: {:?}", dataset);
+        match MiniBatch::new(data_map) {
+            Ok(_mini_batch) => {
+                println!("Successfully created MiniBatch for variable-length data after applying zero-padding.");
+                println!("MiniBatch: {:?}", _mini_batch);
             }
             Err(e) => {
                 panic!(
-                    "Error creating dataset for variable-length data even after zero-padding: {}",
+                    "Error creating MiniBatch for variable-length data even after zero-padding: {}",
                     e
                 );
             }
@@ -162,9 +162,9 @@ mod tests {
             Ok(t) => {
                 let mut data_map = HashMap::new();
                 data_map.insert("tokens".to_string(), t);
-                match Dataset::new(data_map) {
-                    Ok(_) => panic!("Expected Dataset::new to fail due to inconsistent shapes, but it succeeded."),
-                    Err(e) => println!("Correctly rejected by Dataset::new: {}", e),
+                match MiniBatch::new(data_map) {
+                    Ok(_) => panic!("Expected MiniBatch::new to fail due to inconsistent shapes, but it succeeded."),
+                    Err(e) => println!("Correctly rejected by MiniBatch::new: {}", e),
                 }
             }
             Err(e) => {
