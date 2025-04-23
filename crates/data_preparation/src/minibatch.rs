@@ -1,6 +1,7 @@
+use crate::collator::Collator;
 use crate::sample::Sample;
-use anyhow::{anyhow, bail, Result};
-use std::collections::{HashMap, HashSet};
+use anyhow::{anyhow, Result};
+use std::collections::HashMap;
 use tch::{Device, Tensor};
 
 /// The `MiniBatch` struct represents a batch of data examples grouped for model input.
@@ -23,64 +24,19 @@ use tch::{Device, Tensor};
 /// - `"pixel_values"` -> shape `[4, 3, 224, 224]`
 #[derive(Debug)]
 pub struct MiniBatch {
-    tensors: HashMap<String, Tensor>,
+    pub tensors: HashMap<String, Tensor>,
 }
 
 impl MiniBatch {
-    /// Constructs a `MiniBatch` from a list of individual [`Sample`]s.
+    /// Constructs a `MiniBatch` by applying the given [`Collator`] to a
+    /// list of individual [`Sample`]s. All batching logic (e.g., stacking
+    /// , padding) is delegated to the collator of our choice.
     ///
-    /// This stacks the tensors from each sample along the batch dimension,
-    /// producing one batched tensor per feature.
-    ///
-    /// # Validation checks:
-    /// - All `Sample`s must contain the same set of feature keys.
-    /// - For each feature key, the associated tensors must have the same
-    ///   shape across samples to be stackable.
-    pub fn from_samples(samples: Vec<Sample>) -> Result<Self> {
-        if samples.is_empty() {
-            return Err(anyhow!("Cannot create mini-batch from empty sample list"));
-        }
-
-        // Use the first sample to extract the expected set of feature keys
-        let expected_keys: HashSet<&String> = samples[0].features.keys().collect();
-
-        // Ensure all samples have the same keys
-        if samples[1..].iter().any(|s| {
-            s.features.len() != expected_keys.len()
-                || !s.features.keys().all(|k| expected_keys.contains(k))
-        }) {
-            bail!("Mismatched feature keys across samples");
-        }
-
-        // Stack tensors for each feature
-        let mut tensors = HashMap::with_capacity(expected_keys.len());
-        for key in expected_keys {
-            // Gather tensor references for this feature across all samples
-            let tensors_to_stack: Vec<&Tensor> = samples
-                .iter()
-                .map(|s| s.features.get(key).expect("Validated key"))
-                .collect();
-
-            // Validate that tensor shapes are compatabile for stacking
-            let reference_shape = tensors_to_stack[0].size();
-            for (i, tensor) in tensors_to_stack.iter().enumerate() {
-                if tensor.size() != reference_shape {
-                    bail!(
-                        "Shape mismatch in sample {} for feature '{}': expected {:?}, got {:?}",
-                        i,
-                        key,
-                        reference_shape,
-                        tensor.size()
-                    );
-                }
-            }
-
-            // Stack along dimension 0 to form the batched tensor.
-            // Shape validation check above ensures that this call is safe.
-            let stacked = Tensor::stack(&tensors_to_stack, 0);
-            tensors.insert(key.clone(), stacked);
-        }
-        Ok(Self { tensors })
+    /// Example:
+    /// // Stack-only default
+    /// let batch = MiniBatch::collate(samples, StackCollator);
+    pub fn collate(samples: Vec<Sample>, collator: impl Collator) -> Result<Self> {
+        collator.collate(samples)
     }
 
     /// Returns the number of samples in the batch.
@@ -119,6 +75,7 @@ impl MiniBatch {
 #[cfg(test)]
 mod minibatch_test {
     use super::*;
+    use crate::collator::StackCollator;
     use anyhow::Result;
     use tch::{Device, Kind, Tensor};
 
@@ -136,9 +93,9 @@ mod minibatch_test {
     }
 
     #[test]
-    fn test_minibatch_from_samples() -> Result<()> {
+    fn test_minibatch_collate() -> Result<()> {
         let samples = vec![make_sample(1), make_sample(2), make_sample(3)];
-        let batch = MiniBatch::from_samples(samples)?;
+        let batch = MiniBatch::collate(samples, StackCollator)?;
 
         assert_eq!(batch.batch_size()?, 3);
 
@@ -155,7 +112,7 @@ mod minibatch_test {
 
     #[test]
     fn test_minibatch_to_device() -> Result<()> {
-        let cpu_batch = MiniBatch::from_samples(vec![make_sample(9), make_sample(10)])?;
+        let cpu_batch = MiniBatch::collate(vec![make_sample(9), make_sample(10)], StackCollator)?;
         let target_device = Device::cuda_if_available();
         let moved_batch = cpu_batch.to_device(target_device);
 
@@ -168,12 +125,12 @@ mod minibatch_test {
 
     #[test]
     fn test_minibatch_shape_mismatch() {
-        let empty = MiniBatch::from_samples(vec![]);
+        let empty = MiniBatch::collate(vec![], StackCollator);
         assert!(empty.is_err());
 
         let s1 = Sample::from_single("input_ids", Tensor::zeros(&[2], (Kind::Float, Device::Cpu)));
         let s2 = Sample::from_single("input_ids", Tensor::zeros(&[3], (Kind::Float, Device::Cpu)));
-        let result = MiniBatch::from_samples(vec![s1, s2]);
+        let result = MiniBatch::collate(vec![s1, s2], StackCollator);
         assert!(result.is_err());
     }
 
@@ -181,7 +138,7 @@ mod minibatch_test {
     fn test_minibatch_key_mismatch() {
         let s1 = Sample::from_single("input_ids", Tensor::from_slice(&[1]));
         let s2 = Sample::from_single("labels", Tensor::from_slice(&[0]));
-        let result = MiniBatch::from_samples(vec![s1, s2]);
+        let result = MiniBatch::collate(vec![s1, s2], StackCollator);
         assert!(result.is_err());
     }
 }
