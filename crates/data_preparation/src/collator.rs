@@ -19,23 +19,20 @@ pub struct StackCollator;
 impl Collator for StackCollator {
     fn collate(&self, samples: Vec<Sample>) -> Result<MiniBatch> {
         if samples.is_empty() {
-            return Err(anyhow!("Cannot create mini-batch from empty sample list"));
+            bail!("Cannot collate empty sample list");
         }
 
-        // Use the first sample to extract the expected set of feature keys
-        let expected_keys: HashSet<&String> = samples[0].features.keys().collect();
-
-        // Ensure all samples have the same keys
-        if samples[1..].iter().any(|s| {
-            s.features.len() != expected_keys.len()
-                || !s.features.keys().all(|k| expected_keys.contains(k))
-        }) {
-            bail!("Mismatched feature keys across samples");
+        // Validate feature keys
+        let first_keys: HashSet<&String> = samples[0].features.keys().collect();
+        for sample in &samples {
+            if sample.features.keys().collect::<HashSet<_>>() != first_keys {
+                bail!("Mismatched feature keys across samples");
+            }
         }
 
         // Stack tensors for each feature
-        let mut tensors = HashMap::with_capacity(expected_keys.len());
-        for key in expected_keys {
+        let mut tensors = HashMap::with_capacity(first_keys.len());
+        for key in first_keys {
             // Gather tensor references for this feature across all samples
             let tensors_to_stack: Vec<&Tensor> = samples
                 .iter()
