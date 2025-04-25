@@ -36,7 +36,7 @@ impl MiniBatch {
     /// // Stack-only default
     /// let batch = MiniBatch::collate(samples, StackCollator);
     pub fn collate(samples: Vec<Sample>, collator: impl Collator) -> Result<Self> {
-        collator.collate(samples)
+        collator.collate(&samples)
     }
 
     /// Returns the number of samples in the batch.

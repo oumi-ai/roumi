@@ -6,7 +6,7 @@ use tch::Tensor;
 
 /// A `Collator` defines how to pad and combine multiple [`Sample`]s into a [`MiniBatch`].
 pub trait Collator {
-    fn collate(&self, samples: Vec<Sample>) -> Result<MiniBatch>;
+    fn collate(&self, samples: &[Sample]) -> Result<MiniBatch>;
 }
 
 /// A `Collator` that simply stacks tensors with identical shapes.
@@ -17,14 +17,14 @@ pub trait Collator {
 pub struct StackCollator;
 
 impl Collator for StackCollator {
-    fn collate(&self, samples: Vec<Sample>) -> Result<MiniBatch> {
+    fn collate(&self, samples: &[Sample]) -> Result<MiniBatch> {
         if samples.is_empty() {
             bail!("Cannot collate empty sample list");
         }
 
         // Validate feature keys
         let first_keys: HashSet<&String> = samples[0].features.keys().collect();
-        for sample in &samples {
+        for sample in samples {
             if sample.features.keys().collect::<HashSet<_>>() != first_keys {
                 bail!("Mismatched feature keys across samples");
             }
@@ -207,14 +207,14 @@ impl PaddingCollator {
 
 /// Collate [`Sample`]s into a [`MiniBatch`], applying padding as configured per feature
 impl Collator for PaddingCollator {
-    fn collate(&self, samples: Vec<Sample>) -> Result<MiniBatch> {
+    fn collate(&self, samples: &[Sample]) -> Result<MiniBatch> {
         if samples.is_empty() {
             bail!("Cannot collate empty sample list");
         }
 
         // Validate feature keys
         let first_keys: HashSet<&String> = samples[0].features.keys().collect();
-        for sample in &samples {
+        for sample in samples {
             if sample.features.keys().collect::<HashSet<_>>() != first_keys {
                 bail!("Mismatched feature keys across samples");
             }
