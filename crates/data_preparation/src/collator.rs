@@ -143,8 +143,8 @@ impl PaddingCollator {
     ///     - `PaddingRule::FixedRight(n)` = pad to a fixed length `n` (right-side/bottom-side)
     ///     - `PaddingRule::FixedLeft(n)` = pad to a fixed length `n` (left-side/topside)
     ///     -`PaddingRule::Symmetric(n)` = pad to a fixed length `n` with equal padding on both sides.
-    /// - `pad_values`: optional padding value (defaults to 0.0)
-    pub fn pad<I>(mut self, feature: impl ToString, rules: I, pad_values: Option<f64>) -> Self
+    /// - `pad_value`: optional padding value (defaults to 0.0)
+    pub fn pad<I>(mut self, feature: impl ToString, rules: I, pad_value: Option<f64>) -> Self
     where
         I: IntoIterator<Item = (usize, PaddingRule)>,
     {
@@ -154,7 +154,7 @@ impl PaddingCollator {
             .or_default()
             .extend(rules);
 
-        if let Some(v) = pad_values {
+        if let Some(v) = pad_value {
             self.pad_values.insert(key, v);
         }
         self
