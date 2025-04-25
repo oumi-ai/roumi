@@ -83,9 +83,15 @@ impl Collator for StackCollator {
 /// Defines how a tensor should be padded across a batch
 #[derive(Debug)]
 pub enum PaddingRule {
-    MaxLength,        // Pad to maximum size of batch
-    Fixed(i64),     // Pad (or truncate) to exactly this size
-    Symmetric(i64), // Pad evenly to both sides.
+    // Pad to maximum size of batch
+    MaxLength,
+    // Pad (or truncate) to the right to exactly this size
+    FixedRight(i64),
+    // Pad to the left to exactly this size
+    FixedLeft(i64),
+    // Center-pad to reach exactly this size.
+    // For odd padding amounts, the extra unit goes to the right/bottom.
+    Symmetric(i64),
 }
 
 /// A `Collator` that pads variable-length tensors across multiple
@@ -106,8 +112,8 @@ pub enum PaddingRule {
 ///     //MaxLength padding on dimension 0, with default pad_value = 0.0
 ///     .pad("input_ids", vec![(0, PaddingRule::MaxLength)], None)    
 ///
-///     //fixed length padding on dimension 1 to 22, with custom pad_value = -100.0
-///     .pad("labels", vec![(1, PaddingRule::Fixed(22))], Some(-100.0))   
+///     //fixed length padding to the right on dimension 1 to 22, with custom pad_value = -100.0
+///     .pad("labels", vec![(1, PaddingRule::FixedRight(22))], Some(-100.0))   
 /// ```
 #[derive(Debug)]
 pub struct PaddingCollator {
@@ -134,7 +140,8 @@ impl PaddingCollator {
     /// - `feature`: feature name (e.g., `"input_ids"`)
     /// - `rules`: list of `(dimension, target_length)`:
     ///     - `PaddingRule::MaxLength` = pad to maximum size in the batch (right-side/bottom-side)
-    ///     - `PaddingRule::Fixed(n)` = pad to a fixed length `n` (right-side/bottom-side)
+    ///     - `PaddingRule::FixedRight(n)` = pad to a fixed length `n` (right-side/bottom-side)
+    ///     - `PaddingRule::FixedLeft(n)` = pad to a fixed length `n` (left-side/topside)
     ///     -`PaddingRule::Symmetric(n)` = pad to a fixed length `n` with equal padding on both sides.
     /// - `pad_values`: optional padding value (defaults to 0.0)
     pub fn pad<I>(mut self, feature: impl ToString, rules: I, pad_values: Option<f64>) -> Self
@@ -169,7 +176,9 @@ impl PaddingCollator {
             }
             target[dim] = match rule {
                 PaddingRule::MaxLength => tensors.iter().map(|t| t.size()[dim]).max().unwrap_or(0),
-                PaddingRule::Fixed(n) | PaddingRule::Symmetric(n) => *n,
+                PaddingRule::FixedRight(n)
+                | PaddingRule::FixedLeft(n)
+                | PaddingRule::Symmetric(n) => *n,
             };
         }
         Ok(target)
@@ -193,6 +202,7 @@ impl PaddingCollator {
                     let pad_total = target_len - current_len;
                     let (pad_before, pad_after) = match rule {
                         PaddingRule::Symmetric(_) => (pad_total / 2, pad_total - pad_total / 2),
+                        PaddingRule::FixedLeft(_) => (pad_total, 0),
                         _ => (0, pad_total),
                     };
 
@@ -345,7 +355,7 @@ mod paddingcollator_tests {
     }
 
     #[test]
-    fn test_padding_collator_fixed_3d() -> Result<()> {
+    fn test_padding_collator_fixed_right_3d() -> Result<()> {
         let img1 = Tensor::zeros(&[3, 28, 30], (Kind::Float, Device::Cpu));
         let img2 = Tensor::ones(&[3, 32, 32], (Kind::Float, Device::Cpu));
         let samples = vec![
@@ -354,7 +364,10 @@ mod paddingcollator_tests {
         ];
         let collator = PaddingCollator::new().pad(
             "pixel_values",
-            vec![(1, PaddingRule::Fixed(32)), (2, PaddingRule::Fixed(32))],
+            vec![
+                (1, PaddingRule::FixedRight(32)),
+                (2, PaddingRule::FixedRight(32)),
+            ],
             Some(0.0),
         );
         let batch = MiniBatch::collate(samples, collator)?;
@@ -364,7 +377,7 @@ mod paddingcollator_tests {
     }
 
     #[test]
-    fn test_padding_collator_fixed_padding_content() -> Result<()> {
+    fn test_padding_collator_fixed_right_padding_content() -> Result<()> {
         // Single channel 2x2 image with distinct values
         // [ [1, 2],
         //   [3, 4]]
@@ -372,7 +385,10 @@ mod paddingcollator_tests {
         let samples = vec![Sample::from_single("img", img)];
         let collator = PaddingCollator::new().pad(
             "img",
-            vec![(1, PaddingRule::Fixed(4)), (2, PaddingRule::Fixed(4))],
+            vec![
+                (1, PaddingRule::FixedRight(4)),
+                (2, PaddingRule::FixedRight(4)),
+            ],
             Some(0.0),
         );
         let batch = MiniBatch::collate(samples, collator)?;
@@ -380,6 +396,29 @@ mod paddingcollator_tests {
         assert_eq!(output.size(), &[1, 1, 4, 4]);
 
         let expected = Tensor::from_slice(&[1, 2, 0, 0, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+            .reshape(&[1, 1, 4, 4]);
+        assert!(output.equal(&expected));
+        Ok(())
+    }
+
+    #[test]
+    fn test_padding_collator_fixed_left_padding_content() -> Result<()> {
+        let img = Tensor::from_slice(&[1i64, 2, 3, 4]).reshape(&[1, 2, 2]);
+        let samples = vec![Sample::from_single("img", img)];
+
+        let collator = PaddingCollator::new().pad(
+            "img",
+            vec![
+                (1, PaddingRule::FixedLeft(4)),
+                (2, PaddingRule::FixedLeft(4)),
+            ],
+            Some(0.0),
+        );
+        let batch = MiniBatch::collate(samples, collator)?;
+        let output = batch.get("img")?;
+        assert_eq!(output.size(), &[1, 1, 4, 4]);
+
+        let expected = Tensor::from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 0, 0, 3, 4])
             .reshape(&[1, 1, 4, 4]);
         assert!(output.equal(&expected));
         Ok(())
