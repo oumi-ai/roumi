@@ -24,9 +24,26 @@ impl Collator for StackCollator {
 
         // Validate feature keys
         let first_keys: HashSet<&String> = samples[0].features.keys().collect();
-        for sample in samples {
-            if sample.features.keys().collect::<HashSet<_>>() != first_keys {
-                bail!("Mismatched feature keys across samples");
+        for (i, sample) in samples.iter().enumerate().skip(1) {
+            let missing_keys: Vec<&String> = first_keys
+                .iter()
+                .filter(|&&k| !sample.features.contains_key(k))
+                .cloned()
+                .collect();
+
+            let extra_keys: Vec<&String> = sample
+                .features
+                .keys()
+                .filter(|k| !first_keys.contains(k))
+                .collect();
+
+            if !missing_keys.is_empty() || !extra_keys.is_empty() {
+                bail!(
+                    "Sample #{} has mismatch feature keys:\n -Missing: {:?}\n -Extra: {:?}",
+                    i,
+                    missing_keys,
+                    extra_keys
+                )
             }
         }
 
@@ -214,9 +231,26 @@ impl Collator for PaddingCollator {
 
         // Validate feature keys
         let first_keys: HashSet<&String> = samples[0].features.keys().collect();
-        for sample in samples {
-            if sample.features.keys().collect::<HashSet<_>>() != first_keys {
-                bail!("Mismatched feature keys across samples");
+        for (i, sample) in samples.iter().enumerate().skip(1) {
+            let missing_keys: Vec<&String> = first_keys
+                .iter()
+                .filter(|&&k| !sample.features.contains_key(k))
+                .cloned()
+                .collect();
+
+            let extra_keys: Vec<&String> = sample
+                .features
+                .keys()
+                .filter(|k| !first_keys.contains(k))
+                .collect();
+
+            if !missing_keys.is_empty() || !extra_keys.is_empty() {
+                bail!(
+                    "Sample #{} has mismatch feature keys:\n -Missing: {:?}\n -Extra: {:?}",
+                    i,
+                    missing_keys,
+                    extra_keys
+                )
             }
         }
 
