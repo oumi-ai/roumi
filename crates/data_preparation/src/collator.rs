@@ -83,7 +83,7 @@ impl Collator for StackCollator {
 /// Defines how a tensor should be padded across a batch
 #[derive(Debug)]
 pub enum PaddingRule {
-    Dynamic,        // Pad to maximum size of batch
+    MaxLength,        // Pad to maximum size of batch
     Fixed(i64),     // Pad (or truncate) to exactly this size
     Symmetric(i64), // Pad evenly to both sides.
 }
@@ -103,8 +103,8 @@ pub enum PaddingRule {
 /// ```ignore
 /// let collator = PaddingCollator::new()
 ///     
-///     //dynamic padding on dimension 0, with default pad_value = 0.0
-///     .pad("input_ids", vec![(0, PaddingRule::Dynamic)], None)    
+///     //MaxLength padding on dimension 0, with default pad_value = 0.0
+///     .pad("input_ids", vec![(0, PaddingRule::MaxLength)], None)    
 ///
 ///     //fixed length padding on dimension 1 to 22, with custom pad_value = -100.0
 ///     .pad("labels", vec![(1, PaddingRule::Fixed(22))], Some(-100.0))   
@@ -133,7 +133,7 @@ impl PaddingCollator {
     /// # Arguments:
     /// - `feature`: feature name (e.g., `"input_ids"`)
     /// - `rules`: list of `(dimension, target_length)`:
-    ///     - `PaddingRule::Dynamic` = pad to maximum size in the batch (right-side/bottom-side)
+    ///     - `PaddingRule::MaxLength` = pad to maximum size in the batch (right-side/bottom-side)
     ///     - `PaddingRule::Fixed(n)` = pad to a fixed length `n` (right-side/bottom-side)
     ///     -`PaddingRule::Symmetric(n)` = pad to a fixed length `n` with equal padding on both sides.
     /// - `pad_values`: optional padding value (defaults to 0.0)
@@ -168,7 +168,7 @@ impl PaddingCollator {
                 );
             }
             target[dim] = match rule {
-                PaddingRule::Dynamic => tensors.iter().map(|t| t.size()[dim]).max().unwrap_or(0),
+                PaddingRule::MaxLength => tensors.iter().map(|t| t.size()[dim]).max().unwrap_or(0),
                 PaddingRule::Fixed(n) | PaddingRule::Symmetric(n) => *n,
             };
         }
@@ -307,7 +307,7 @@ mod paddingcollator_tests {
             Sample::from_single("input_ids", Tensor::from_slice(&[4, 5])),
         ];
         let collator =
-            PaddingCollator::new().pad("input_ids", vec![(0, PaddingRule::Dynamic)], None);
+            PaddingCollator::new().pad("input_ids", vec![(0, PaddingRule::MaxLength)], None);
         let batch = MiniBatch::collate(samples, collator)?;
         let input_ids = batch.get("input_ids")?;
         assert_eq!(input_ids.size(), &[2, 3]);
@@ -325,8 +325,8 @@ mod paddingcollator_tests {
             .with_feature("attention_mask", Tensor::from_slice(&[1, 1]));
 
         let collator = PaddingCollator::new()
-            .pad("input_ids", vec![(0, PaddingRule::Dynamic)], None)
-            .pad("attention_mask", vec![(0, PaddingRule::Dynamic)], None);
+            .pad("input_ids", vec![(0, PaddingRule::MaxLength)], None)
+            .pad("attention_mask", vec![(0, PaddingRule::MaxLength)], None);
 
         let batch = MiniBatch::collate(vec![s1, s2], collator)?;
         let input_ids = batch.get("input_ids")?;
@@ -415,7 +415,7 @@ mod paddingcollator_tests {
             Tensor::from_slice(&[1, 2]),
         )];
         let collator =
-            PaddingCollator::new().pad("input_ids", vec![(1, PaddingRule::Dynamic)], None);
+            PaddingCollator::new().pad("input_ids", vec![(1, PaddingRule::MaxLength)], None);
         assert!(MiniBatch::collate(samples, collator).is_err());
     }
 
