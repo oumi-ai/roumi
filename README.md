@@ -30,12 +30,21 @@ pip install maturin
 ```bash
 cd crates/grpo_rewards
 maturin develop
+cd ../..
 ```
 
 ## Run the Python Example
 ```bash
 cd ../../examples
 python example_grpo_rewards.py
+```
+
+## Building and Running the Plugin
+```bash
+cd plugins/template
+cargo build --release
+cd ../../examples
+python using_plugin_rewards.py
 ```
 
 ## Building and Running the Rust Code
