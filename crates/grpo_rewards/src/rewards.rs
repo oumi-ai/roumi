@@ -1,9 +1,11 @@
 // crates/grpo_rewards/src/rewards.rs
-use std::collections::HashMap;
 use anyhow;
+use std::collections::HashMap;
 
 pub trait Calculator: Send + Sync {
-    fn new(params: HashMap<String, String>) -> Self where Self: Sized;
+    fn new(params: HashMap<String, String>) -> Self
+    where
+        Self: Sized;
     fn compute_rewards(
         &self,
         prompts: &Vec<String>,
@@ -40,11 +42,11 @@ impl Calculator for CompletionSameLengthAsPromptCalculator {
 
     fn compute_rewards(
         &self,
-        prompts: &Vec<String>,  // Remove the underscore to use this parameter
+        prompts: &Vec<String>, // Remove the underscore to use this parameter
         completions: &Vec<String>,
     ) -> anyhow::Result<Vec<f32>> {
         let mut result: Vec<f32> = Vec::<f32>::with_capacity(completions.len());
-        
+
         // Handle the case where prompts is empty but completions is not
         if prompts.is_empty() && !completions.is_empty() {
             // Either use a default value or just process completions
@@ -58,7 +60,7 @@ impl Calculator for CompletionSameLengthAsPromptCalculator {
                 result.push(-((length_diff.abs()) as f32));
             }
         }
-        
+
         Ok(result)
     }
 }
