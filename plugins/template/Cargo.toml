@@ -11,5 +11,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 anyhow = "1.0.75"
-# Add the main crate as a dependency
-grpo_rewards = { path = "../../crates/grpo_rewards" }
+grpo_rewards = { git = "ssh://git@github.com/oumi-ai/roumi.git", rev = "6c724fe140887c12a17c2954bbfd545c3b236f7f", package = "grpo_rewards" }
+
