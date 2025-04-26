@@ -2,15 +2,18 @@
 use anyhow;
 use std::collections::HashMap;
 
+// Update trait definition to require Send + Sync for thread safety with plugins
 pub trait Calculator: Send + Sync {
-    fn new(params: HashMap<String, String>) -> Self
-    where
-        Self: Sized;
     fn compute_rewards(
         &self,
         prompts: &Vec<String>,
         completions: &Vec<String>,
     ) -> anyhow::Result<Vec<f32>>;
+
+    // Factory method (keep for compatibility)
+    fn new(params: HashMap<String, String>) -> Self
+    where
+        Self: Sized;
 }
 
 pub struct CompletionNegativeLengthCalculator;

@@ -2,6 +2,11 @@
 members = ["crates/*"]
 resolver = "2"
 
+exclude = [
+    "plugins/*",
+    # other plugins...
+]
+
 [workspace.package]
 edition = "2021"
 version = "0.1.0"

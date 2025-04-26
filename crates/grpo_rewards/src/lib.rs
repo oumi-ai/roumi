@@ -1,14 +1,31 @@
-// crates/grpo_rewards/src/lib.rs
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
 
-// Create the rewards module and make it public
+mod plugin_loader;
+use plugin_loader::PluginLoader;
+
 pub mod rewards;
 use rewards::{
     Calculator, CompletionNegativeLengthCalculator, CompletionSameLengthAsPromptCalculator,
 };
+
+// Create a global plugin loader
+lazy_static::lazy_static! {
+    static ref PLUGIN_LOADER: Arc<Mutex<PluginLoader>> = Arc::new(Mutex::new(PluginLoader::new()));
+}
+
+// Add a Python function to load plugins
+#[pyfunction]
+fn load_reward_plugin(path: &str) -> PyResult<Vec<String>> {
+    let mut loader = PLUGIN_LOADER.lock().unwrap();
+    loader
+        .load_plugin(path)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+}
 
 #[pyclass]
 pub struct GrpoRewards {
@@ -18,6 +35,7 @@ pub struct GrpoRewards {
     calculator: Box<dyn Calculator>,
 }
 
+// Function to convert Python dictionary to Rust HashMap
 fn convert_pydict_to_str2str_map(
     d: Option<&Bound<'_, PyDict>>,
 ) -> anyhow::Result<HashMap<String, String>> {
@@ -48,17 +66,35 @@ fn convert_pydict_to_str2str_map(
 #[pymethods]
 impl GrpoRewards {
     #[new]
-    #[pyo3(signature = (function_name, *, function_params=None))]
-    fn py_new(function_name: &str, function_params: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+    #[pyo3(signature = (function_name, *, function_params=None, from_plugin=false))]
+    fn py_new(
+        function_name: &str,
+        function_params: Option<&Bound<'_, PyDict>>,
+        from_plugin: bool,
+    ) -> PyResult<Self> {
         let internal_func_params = convert_pydict_to_str2str_map(function_params)?;
 
-        // Factory pattern to create the right calculator
-        let calculator: Box<dyn Calculator> = match function_name {
-            "CompletionNegativeLengthCalculator" => Box::new(
-                CompletionNegativeLengthCalculator::new(internal_func_params),
-            ),
-            // Add other calculator types here
-            _ => return Err(PyValueError::new_err("Unknown calculator.")),
+        let calculator: Box<dyn Calculator> = if from_plugin {
+            // Try to load from plugin
+            let loader = PLUGIN_LOADER.lock().unwrap();
+            match loader.create_calculator(function_name, internal_func_params) {
+                Some(calc) => calc,
+                None => {
+                    return Err(PyValueError::new_err(format!(
+                        "Calculator '{}' not found in loaded plugins",
+                        function_name
+                    )))
+                }
+            }
+        } else {
+            // Factory pattern for built-in calculators
+            match function_name {
+                "CompletionNegativeLengthCalculator" => Box::new(
+                    CompletionNegativeLengthCalculator::new(internal_func_params),
+                ),
+                // Add other calculator types here
+                _ => return Err(PyValueError::new_err("Unknown calculator.")),
+            }
         };
 
         Ok(GrpoRewards {
@@ -92,6 +128,7 @@ impl GrpoRewards {
 #[pymodule]
 fn grpo_rewards(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<GrpoRewards>()?;
+    m.add_function(wrap_pyfunction!(load_reward_plugin, m)?)?;
     Ok(())
 }
 

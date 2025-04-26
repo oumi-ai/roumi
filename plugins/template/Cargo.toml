@@ -1,0 +1,15 @@
+[package]
+name = "grpo_rewards_template_plugin"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[lib]
+name = "grpo_rewards_template_plugin"
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1.0.75"
+# Add the main crate as a dependency
+grpo_rewards = { path = "../../crates/grpo_rewards" }
