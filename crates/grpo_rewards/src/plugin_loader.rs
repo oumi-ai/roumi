@@ -19,6 +19,22 @@ impl PluginLoader {
         }
     }
 
+    /// Loads a calculator plugin from the specified path.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the dynamic library (.so, .dll, .dylib) containing the plugin
+    ///
+    /// # Returns
+    ///
+    /// A Result containing a vector of calculator names that were successfully loaded
+    /// from the plugin, or an error if the plugin could not be loaded.
+    ///
+    /// # Safety
+    ///
+    /// This function is unsafe because it loads and executes code from a dynamic library.
+    /// The caller must ensure that the library at the given path is a valid calculator plugin
+    /// that correctly implements the expected interface.
     pub fn load_plugin(&mut self, path: &str) -> Result<Vec<String>> {
         unsafe {
             // Load the dynamic library
@@ -50,6 +66,17 @@ impl PluginLoader {
         }
     }
 
+    /// Creates a calculator instance by name with the provided parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the calculator to create, as returned by `load_plugin`
+    /// * `params` - A hashmap of string parameters to configure the calculator
+    ///
+    /// # Returns
+    ///
+    /// Some(Box<dyn Calculator>) if the calculator was found and successfully created,
+    /// or None if no calculator with the specified name exists.
     pub fn create_calculator(
         &self,
         name: &str,
