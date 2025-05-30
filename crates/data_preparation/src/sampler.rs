@@ -363,6 +363,80 @@ impl Sampler for WeightedRandomSampler {
     }
 }
 
+/// ============================================================================
+/// Wraps a [`Sampler`] to yield mini-batches of items.
+///
+/// Each call to `.iter(epoch)` produces successive `Vec<S::Item>` batches, where each
+/// mini-batch contains up to `batch_size` elements drawn from the underlying sampler.
+/// If `drop_last` is `true`, any final mini-batch smaller than `batch_size` will be discarded.
+///
+/// # Type parameters
+/// - `S`: The underlying sampler implementing [`Sampler`] (e.g., `RandomSampler`)
+///
+/// # Arguments:
+/// - `sampler`: Base sampler to wrap
+/// - `batch_size`: Number of items per batch. Must be >= 1
+/// - `drop_last`: If true, discards mini-batches smaller than `batch_size`
+///
+/// # Example
+/// ```ignore
+/// // Create mini-batches of 32 indices from a 1000-item dataset.
+/// let base_sampler = SequentialSampler::new(1000);
+/// let batch_sampler = BatchSampler::new(base_sampler, 32, false).unwrap();
+///
+/// for mini_batch in batch_sampler.iter(0) {
+///     // `mini_batch` is Vec<usize> of length 32, except the last mini-batch
+///     println!("Batch size: {}", mini_batch.len());
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct BatchSampler<S> {
+    sampler: S,
+    batch_size: usize,
+    drop_last: bool,
+}
+
+impl<S: Sampler> BatchSampler<S> {
+    pub fn new(sampler: S, batch_size: usize, drop_last: bool) -> Result<Self> {
+        ensure!(
+            batch_size > 0,
+            "batch_size must be > 0, but got batch_size={}",
+            batch_size
+        );
+        Ok(Self {
+            sampler,
+            batch_size,
+            drop_last,
+        })
+    }
+}
+
+impl<S: Sampler> Sampler for BatchSampler<S> {
+    type Item = Vec<S::Item>;
+
+    fn iter(&self, epoch: usize) -> Box<dyn Iterator<Item = Self::Item> + Send + '_> {
+        let mut sampler_iter = self.sampler.iter(epoch);
+        let batch_size = self.batch_size;
+        let drop_last = self.drop_last;
+
+        Box::new(std::iter::from_fn(move || {
+            let mut mini_batch = Vec::with_capacity(batch_size);
+            for _ in 0..batch_size {
+                if let Some(item) = sampler_iter.next() {
+                    mini_batch.push(item);
+                } else {
+                    break;
+                }
+            }
+            if mini_batch.len() == batch_size || (!drop_last && !mini_batch.is_empty()) {
+                Some(mini_batch)
+            } else {
+                None
+            }
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,6 +601,90 @@ mod tests {
                 WeightedRandomSampler::new(weights_len, weights, false, None, TEST_SEED).unwrap();
             let samples = sampler.iter(0).collect::<Vec<_>>();
             assert_eq!(HashSet::<_>::from_iter(samples).len(), weights_len);
+        }
+    }
+
+    mod batch_sampler_tests {
+        use super::*;
+        use crate::collator::{Collator, StackCollator};
+
+        #[test]
+        fn test_batches_full() {
+            let base_sampler = SequentialSampler::new(10);
+            let batch_sampler = BatchSampler::new(base_sampler, 2, false).unwrap();
+            let mini_batches: Vec<_> = batch_sampler.iter(0).collect();
+            assert_eq!(
+                mini_batches,
+                vec![vec![0, 1], vec![2, 3], vec![4, 5], vec![6, 7], vec![8, 9]]
+            );
+        }
+
+        #[test]
+        fn test_batches_drop_last() {
+            let base_sampler = SequentialSampler::new(10);
+            let batch_sampler = BatchSampler::new(base_sampler, 3, true).unwrap();
+            let mini_batches: Vec<_> = batch_sampler.iter(0).collect();
+            assert_eq!(
+                mini_batches,
+                vec![vec![0, 1, 2], vec![3, 4, 5], vec![6, 7, 8]]
+            );
+        }
+
+        #[test]
+        fn test_integration_with_dataset() -> Result<()> {
+            let samples = vec![
+                Sample::from_single("data", Tensor::from(1)),
+                Sample::from_single("data", Tensor::from(2)),
+                Sample::from_single("data", Tensor::from(3)),
+            ];
+            let dataset = InMemoryDataset::new(samples);
+            let base_sampler = SequentialSampler::new(dataset.len());
+            let sampler = BatchSampler::new(base_sampler, 2, false)?;
+
+            let mut all_values = Vec::new();
+            for batch_indices in sampler.iter(0) {
+                for idx in batch_indices {
+                    let sample = dataset.get(idx).unwrap();
+                    all_values.push(sample.get("data")?.int64_value(&[]));
+                }
+            }
+            assert_eq!(all_values, vec![1, 2, 3]);
+            Ok(())
+        }
+
+        #[test]
+        fn test_integration_with_dataset_and_collator() -> Result<()> {
+            let samples: Vec<Sample> = (0..100)
+                .map(|i| Sample::from_single("data", Tensor::from_slice(&[i])))
+                .collect();
+            let dataset = InMemoryDataset::new(samples);
+
+            // Create pipeline: Sampler -> BaseSampler -> Collator
+            let base_sampler = SequentialSampler::new(dataset.len());
+            let sampler = BatchSampler::new(base_sampler, 10, false)?;
+            let collator = StackCollator;
+
+            // Process batches
+            let mut expected_value = 0;
+            for batch_indices in sampler.iter(0) {
+                let samples: Vec<_> = batch_indices
+                    .iter()
+                    .map(|&i| dataset.get(i).cloned().unwrap())
+                    .collect();
+                let minibatch = collator.collate(&samples)?;
+
+                // Verify batch contents
+                let tensor = minibatch.get("data")?;
+                assert_eq!(tensor.size(), &[10, 1]);
+
+                // Check values
+                let values = tensor.size()[0];
+                for i in 0..values {
+                    assert_eq!(tensor.int64_value(&[i, 0]), expected_value);
+                    expected_value += 1;
+                }
+            }
+            Ok(())
         }
     }
 }
