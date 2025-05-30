@@ -1,6 +1,7 @@
 use anyhow::{ensure, Result};
 use rand::seq::SliceRandom;
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use std::collections::HashSet;
 
 /// A `Sampler` defines the strategy for how to iterate and draw samples from
 /// a dataset.
@@ -159,12 +160,83 @@ impl Sampler for RandomSampler {
     }
 }
 
+/// ============================================================================
+/// Samples elements randomly from a predefined subset of indices, without replacement.
+///
+/// Each call to `iter(epoch)` returns a new deterministic permutation of the provided
+/// indices for that epoch. See `RandomSampler` docs for details.
+///
+/// # Arguments:
+/// - `dataset_size`: Total number of samples in a dataset.
+/// - `indices`: The subset of indices to shuffle and sample from. There should be
+///              no duplicates and each index should be within bounds (`<dataset_size`).
+/// - `base_seed`: Master seed.
+///
+/// # Example
+/// ```ignore
+/// // Create sampler for indices 10-19 of a 1000-sample dataset
+/// let sampler = SubsetRandomSampler::new(1000, (10..20).collect(), 42)?;
+/// let order0: Vec<_> = sampler.iter(0).collect(); // one permutation of 10..19
+/// let order1: Vec<_> = sampler.iter(1).collect(); // a different permutation of 10..19
+/// ```
+#[derive(Debug, Clone)]
+pub struct SubsetRandomSampler {
+    _dataset_size: usize,
+    indices: Vec<usize>,
+    base_seed: u64,
+}
+
+impl SubsetRandomSampler {
+    pub fn new(dataset_size: usize, indices: Vec<usize>, base_seed: u64) -> Result<Self> {
+        ensure!(!indices.is_empty(), "Indices must not be empty");
+
+        let mut seen_indices = HashSet::with_capacity(indices.len());
+        for &index in &indices {
+            ensure!(
+                index < dataset_size,
+                "Index {} out of bounds for dataset of size {}",
+                index,
+                dataset_size,
+            );
+            ensure!(
+                seen_indices.insert(index),
+                "Duplicate index {} found in SubsetRandomSampler",
+                index
+            );
+        }
+        Ok(Self {
+            _dataset_size: dataset_size,
+            indices,
+            base_seed,
+        })
+    }
+
+    #[inline]
+    fn derive_rng_for_epoch(&self, epoch: usize) -> StdRng {
+        StdRng::seed_from_u64(self.base_seed.wrapping_add(epoch as u64))
+    }
+}
+
+impl Sampler for SubsetRandomSampler {
+    type Item = usize;
+
+    fn iter(&self, epoch: usize) -> Box<dyn Iterator<Item = usize> + Send + '_> {
+        let mut rng = self.derive_rng_for_epoch(epoch);
+        let mut shuffled = self.indices.clone();
+        shuffled.shuffle(&mut rng);
+        Box::new(shuffled.into_iter())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dataset::InMemoryDataset;
     use crate::sample::Sample;
     use tch::Tensor;
+
+    const TEST_SEED: u64 = 42;
+    const TEST_DATASET_SIZE: usize = 100;
 
     mod sequential_sampler_tests {
         use super::*;
@@ -199,9 +271,6 @@ mod tests {
         use super::*;
         use std::collections::HashSet;
 
-        const TEST_SEED: u64 = 42;
-        const TEST_DATASET_SIZE: usize = 100;
-
         #[test]
         fn validates_parameters() {
             assert!(RandomSampler::new(10, false, None, TEST_SEED).is_ok());
@@ -234,6 +303,43 @@ mod tests {
             let epoch1 = sampler.iter(1).collect::<Vec<_>>();
             assert_eq!(epoch1, sampler.iter(1).collect::<Vec<_>>());
             assert_ne!(epoch1, sampler.iter(2).collect::<Vec<_>>());
+        }
+    }
+
+    mod subset_random_sampler_tests {
+        use super::*;
+
+        #[test]
+        fn rejects_invalid_indices() {
+            // No indices to sample from
+            assert!(SubsetRandomSampler::new(TEST_DATASET_SIZE, vec![], TEST_SEED).is_err());
+
+            // Duplicate index
+            assert!(SubsetRandomSampler::new(3, vec![1, 1, 2], TEST_SEED).is_err());
+
+            // Index out of bounds
+            assert!(SubsetRandomSampler::new(3, vec![1, 2, 3], TEST_SEED).is_err());
+        }
+
+        #[test]
+        fn shuffles_provided_indices() {
+            let indices = vec![10, 20, 30, 40];
+            let sampler =
+                SubsetRandomSampler::new(TEST_DATASET_SIZE, indices.clone(), TEST_SEED).unwrap();
+            let samples: Vec<_> = sampler.iter(0).collect();
+            assert_eq!(
+                HashSet::<_>::from_iter(samples),
+                HashSet::from_iter(indices)
+            );
+        }
+
+        #[test]
+        fn different_epochs_produce_different_orders() {
+            let sampler = SubsetRandomSampler::new(10, vec![1, 2, 3, 4], TEST_SEED).unwrap();
+            assert_ne!(
+                sampler.iter(1).collect::<Vec<_>>(),
+                sampler.iter(2).collect::<Vec<_>>()
+            );
         }
     }
 }
