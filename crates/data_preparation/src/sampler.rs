@@ -1,4 +1,5 @@
 use anyhow::{ensure, Result};
+use rand::distr::{weighted::WeightedIndex, Distribution};
 use rand::seq::SliceRandom;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::collections::HashSet;
@@ -228,6 +229,140 @@ impl Sampler for SubsetRandomSampler {
     }
 }
 
+/// ============================================================================
+/// Sample elements according to the given weights (probabilities), with optional replacement.
+///
+/// # Arguments:
+/// - `dataset_size`: Total number of samples in a dataset.
+/// - `weights`: Relative weight for each index (need not sum to 1). Length must match `dataset_size`.
+/// - `replacement`: If `true`, each draw is independent and indices may repeat;
+///                  If `false`, each index can only appear once.
+/// - `num_samples`: Number of samples to draw from (defaults to the full-range `dataset_size` if `None`)
+///                  If `replacement=false`, users must have num_samples <= dataset_size.
+/// - `base_seed`: Master seed. See `RandomSampler` docs for details.
+///
+/// # Example
+/// ```ignore
+/// // Draw 3 samples according to weights
+/// let sampler = WeightedRandomSampler::new(
+///     5,                              // dataset_size
+///     vec![1.0, 2.0, 0.5, 4.0, 1.5],  // weights
+///     false,                          // without replacement
+///     Some(3),                        // num_samples
+///     42                              // seed
+/// )?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct WeightedRandomSampler {
+    _dataset_size: usize,
+    weights: Vec<f64>,
+    replacement: bool,
+    num_samples: usize,
+    base_seed: u64,
+}
+
+impl WeightedRandomSampler {
+    pub fn new(
+        dataset_size: usize,
+        weights: Vec<f64>,
+        replacement: bool,
+        num_samples: Option<usize>,
+        base_seed: u64,
+    ) -> Result<Self> {
+        // Validate the `weights` input
+        ensure!(
+            weights.len() == dataset_size,
+            "The length of the weights sequence ({}) does not match the dataset size ({})",
+            weights.len(),
+            dataset_size,
+        );
+        ensure!(
+            !weights.is_empty(),
+            "The weights sequence must not be empty"
+        );
+        ensure!(
+            weights.iter().all(|&w| w >= 0.0 && w.is_finite()),
+            "All weights must be finite and non-negative"
+        );
+        let total_weight: f64 = weights.iter().sum();
+        ensure!(
+            total_weight > 0.0,
+            "All weights are zero - at least one weight must be positive"
+        );
+
+        // Validate the `num_samples` input
+        let num_samples = num_samples.unwrap_or(dataset_size);
+        ensure!(
+            num_samples > 0,
+            "num_samples must be a positive integer value, but got num_samples={}",
+            num_samples,
+        );
+        ensure!(
+            replacement || num_samples <= dataset_size,
+            "num_samples ({}) must be <= dataset_size ({}) when replacement = false",
+            num_samples,
+            dataset_size,
+        );
+
+        Ok(Self {
+            _dataset_size: dataset_size,
+            weights,
+            replacement,
+            num_samples,
+            base_seed,
+        })
+    }
+
+    #[inline]
+    fn derive_rng_for_epoch(&self, epoch: usize) -> StdRng {
+        StdRng::seed_from_u64(self.base_seed.wrapping_add(epoch as u64))
+    }
+}
+
+impl Sampler for WeightedRandomSampler {
+    type Item = usize;
+
+    fn iter(&self, epoch: usize) -> Box<dyn Iterator<Item = usize> + Send + '_> {
+        let mut rng = self.derive_rng_for_epoch(epoch);
+
+        if self.replacement {
+            let distribution =
+                WeightedIndex::new(&self.weights).expect("Weights should be non-negative");
+            Box::new((0..self.num_samples).map(move |_| distribution.sample(&mut rng)))
+        } else {
+            // Without replacement:
+            //
+            // We cannot reuse `WeightedIndex` here, because it only supports independent
+            // draws (with replacement) in constant time. To remove indices once sampled,
+            // one would have to rebuild the alias table after each pick-turning an O(1)
+            // draw into O(n) per sample, i.e., O(n^2) total.
+            //
+            // So instead we use weighted sampling with reservoir here:
+            // 1. For each index `i` with weight `w_i`, draw `u ~ Uniform(0, 1)`
+            // 2. Compute a score for each index `i` as `u.powf(1.0 /w_i)`.
+            let mut scored_indices: Vec<(usize, f64)> = self
+                .weights
+                .iter()
+                .enumerate()
+                .filter(|(_, &weight)| weight > 0.0) // Skip index with zero-weight
+                .map(|(index, &weight)| {
+                    let u = rng.random::<f64>();
+                    (index, u.powf(1.0 / weight))
+                })
+                .collect();
+
+            // 3. Sort scored_indices (`(index, score)`) by score descending and
+            //    take the top N, where N = num_samples
+            // Performance note: The sort is O(n log n) in the dataset size.
+            // We can potentially use a priority queue later for better performance if
+            // dataset_size is large but num_samples is small.
+            scored_indices.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("No NaNs due to filtering"));
+            scored_indices.truncate(self.num_samples);
+            Box::new(scored_indices.into_iter().map(|(index, _)| index))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +475,58 @@ mod tests {
                 sampler.iter(1).collect::<Vec<_>>(),
                 sampler.iter(2).collect::<Vec<_>>()
             );
+        }
+    }
+
+    mod weighted_random_sampler_tests {
+        use super::*;
+
+        #[test]
+        fn validate_weights() {
+            // Empty weights
+            assert!(WeightedRandomSampler::new(3, vec![], false, Some(1), TEST_SEED).is_err());
+
+            // Negative weights
+            assert!(
+                WeightedRandomSampler::new(3, vec![0.1, -0.5, 0.2], true, Some(1), TEST_SEED)
+                    .is_err()
+            );
+
+            // Zero weights
+            assert!(
+                WeightedRandomSampler::new(3, vec![0.0, 0.0, 0.0], false, Some(1), TEST_SEED)
+                    .is_err()
+            );
+        }
+
+        #[test]
+        fn respects_zero_weights() {
+            let weights = vec![1.0, 0.0, 2.0];
+            let sampler =
+                WeightedRandomSampler::new(weights.len(), weights, true, Some(10), TEST_SEED)
+                    .unwrap();
+            assert!(!sampler.iter(0).any(|index| index == 1));
+        }
+
+        #[test]
+        fn with_replacement_samples_correctly() {
+            let weights = vec![0.1, 0.9];
+            let sampler =
+                WeightedRandomSampler::new(weights.len(), weights, true, Some(1000), TEST_SEED)
+                    .unwrap();
+            let samples = sampler.iter(0).collect::<Vec<_>>();
+            let count_1 = samples.iter().filter(|&&index| index == 1).count();
+            assert!(count_1 > 800); // Very likely to have many more 1s than 0s
+        }
+
+        #[test]
+        fn without_replacement_uses_all_indices() {
+            let weights = vec![0.5, 0.5, 0.5, 0.5];
+            let weights_len = weights.len();
+            let sampler =
+                WeightedRandomSampler::new(weights_len, weights, false, None, TEST_SEED).unwrap();
+            let samples = sampler.iter(0).collect::<Vec<_>>();
+            assert_eq!(HashSet::<_>::from_iter(samples).len(), weights_len);
         }
     }
 }
