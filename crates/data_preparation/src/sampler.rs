@@ -1,4 +1,4 @@
-use anyhow::{ensure, Result};
+use anyhow::{anyhow, ensure, Result};
 use rand::distr::{weighted::WeightedIndex, Distribution};
 use rand::seq::SliceRandom;
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -652,6 +652,196 @@ impl Sampler for DistributedSampler {
     }
 }
 
+/// ============================================================================
+/// A sampler that groups indices into length-based buckets before shuffling and batching.
+/// This reduces padding overhead when handling variable-length sequences.
+///
+/// # Type parameters
+/// - `S`: An existing sampler that yields `usize` indices (e.g., `RandomSampler`)
+/// - `F`: A function mapping `usize -> f64`, used to sort indices (e.g., sequence length).
+///
+/// # Arguments:
+/// - `sampler`: Base sampler providing indices per epoch
+/// - `batch_size`: Number of indices per final mini-batch (must be >= 1)
+/// - `drop_last`:  If `true`, incomplete final mini-batches are dropped.
+///                If `false`, they are kept as is.
+/// - `sort_key`: Function mapping `usize` → `f64` used to sort indices within a bucket.
+///               Sorted in descending order: higher key ⇒ earlier in bucket.
+/// - `bucket_size_multiplier`: Multiplier for bucket size. Each bucket’s size is
+///                             `batch_size * bucket_size_multiplier`. Must be ≥ 1.
+/// - `base_seed`: Master RNG seed for deterministic shuffling.
+///
+/// # Algorithm Overview
+/// 1. Pre-bucketing
+///     - Collects indices in groups of size `batch_size * bucket_multiplier`.
+///
+/// 2. Sorting (within each bucket)
+///     - Sorts indices by a user-provided key (e.g., sequence length) in descending order.
+///     - Longer sequences come first, minimizing padding wasted on shorter ones.
+///
+/// 3. Batching
+///     - Splits each sorted bucket into consecutive mini-batches of exactly `batch_size`.
+///     - Partial final batches are kept or dropped based on `drop_last`.
+///
+/// 4. Intra-bucket shuffling
+///     - Randomizes the order of those final mini-batches (not the individual examples)
+///       using a deterministic RNG seed per bucket. This preserves some randomness while
+///       still grouping similar lengths together.
+///
+/// # Example: NLP Training
+/// ```ignore
+/// // Suppose you have a collection of text sequences of varying lengths:
+/// let texts = vec!["short", "medium length", "a much longer piece of text…"];
+/// // Precompute “length” as the sort key for each example:
+/// let lengths: Vec<f64> = texts.iter().map(|t| t.len() as f64).collect();
+///
+/// // Build a BatchBucketSampler that:
+/// // 1. Uses a SequentialSampler over text indices [0..texts.len()).
+/// // 2. Groups indices into buckets of size = 32 * 100 = 3200.
+/// // 3. Sorts each bucket by length (descending).
+/// // 4. Splits into mini‐batches of size 32 (dropping any remainder if `drop_last` is true).
+/// // 5. Shuffles the resulting mini‐batches using a deterministic seed.
+/// let sampler = BatchBucketSampler::new(
+///     SequentialSampler::new(texts.len()),  // base sampler
+///     32,                                   // batch_size
+///     false,                                // drop_last = false
+///     |idx| lengths[idx],                  // sort_key: “length of texts[idx]”
+///     100,                                  // bucket_multiplier (bucket_size = 3200)
+///     42,                                   // base_seed
+/// )?;
+///
+/// // In your training loop:
+/// for epoch in 0..num_epochs {
+///     for batch_indices in sampler.iter(epoch) {
+///         // `batch_indices` is a Vec<usize> of length 32 (except perhaps the last bucket’s remainder)
+///         let batch_texts: Vec<&str> = batch_indices.iter().map(|&i| &texts[i]).collect();
+///         // ... now you can pad/encode batch_texts and pass them to your model ...
+///     }
+/// }
+/// ```
+///
+/// # Design Considerations
+/// 1. Bucket Size: Larger buckets → better length grouping but more memory
+/// 2. Sort Key: Should correlate with example length/complexity
+/// 3. Seed Handling:
+///     a. For reproducibility, we combine `base_seed` with both the epoch and
+///        the bucket’s position:
+///         ```text
+///         bucket_rng_seed = base_seed + epoch + bucket_id
+///         ```  
+///     b. This ensures the same bucket‐level shuffle order across runs when
+///        `base_seed` and `epoch` match.
+///
+/// TODO: benchmarks/ for performance characteristics with different bucket sizes.
+#[derive(Debug, Clone)]
+pub struct BatchBucketSampler<S, F>
+where
+    S: Sampler<Item = usize>,
+    F: Fn(usize) -> f64 + Send + Sync,
+{
+    bucket_sampler: BatchSampler<S>,
+    batch_size: usize,
+    drop_last: bool,
+    sort_key: F,
+    base_seed: u64,
+}
+
+impl<S, F> BatchBucketSampler<S, F>
+where
+    S: Sampler<Item = usize>,
+    F: Fn(usize) -> f64 + Send + Sync,
+{
+    pub fn new(
+        sampler: S,
+        batch_size: usize,
+        drop_last: bool,
+        sort_key: F,
+        bucket_size_multiplier: usize,
+        base_seed: u64,
+    ) -> Result<Self> {
+        ensure!(
+            batch_size > 0,
+            "Batch size must be >= 1, but got batch_size={}",
+            batch_size
+        );
+        ensure!(
+            bucket_size_multiplier > 0,
+            "Bucket size multipler must be >= 1, but got bucket_size_multipler={}",
+            bucket_size_multiplier
+        );
+
+        let bucket_size = batch_size
+            .checked_mul(bucket_size_multiplier)
+            .ok_or_else(|| anyhow!("Bucket size overflow"))?;
+
+        let bucket_sampler = BatchSampler::new(sampler, bucket_size, false)?;
+        Ok(Self {
+            bucket_sampler,
+            batch_size,
+            drop_last,
+            sort_key,
+            base_seed,
+        })
+    }
+}
+
+impl<S, F> Sampler for BatchBucketSampler<S, F>
+where
+    S: Sampler<Item = usize>,
+    F: Fn(usize) -> f64 + Send + Sync,
+{
+    type Item = Vec<usize>;
+
+    /// Produces an iterator of index batches for the given epoch.
+    fn iter(&self, epoch: usize) -> Box<dyn Iterator<Item = Vec<usize>> + Send + '_> {
+        // 1. Obtain an iterator over pre-buckets (each bucket is Vec<usize> of size `bucket_size`).
+        //    Stream one pre-bucket at a time to avoid allocation of all pre-buckets at once.
+        let pre_buckets = self.bucket_sampler.iter(epoch);
+
+        // 2. For each pre-bucket, sort by sort_key, split into mini-batches, then shuffle those batches.
+        let iter = pre_buckets
+            .enumerate()
+            .flat_map(move |(bucket_id, mut bucket_indices)| {
+                // a. Sort bucket by sort_key descending
+                bucket_indices.sort_unstable_by(|&a, &b| {
+                    (self.sort_key)(b)
+                        .partial_cmp(&(self.sort_key)(a))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                // b. Split sorted indices into chunks of `batch_size`.
+                let mut batches_in_bucket = Vec::new();
+                let mut start = 0;
+                let len = bucket_indices.len();
+                while start < len {
+                    let end = (start + self.batch_size).min(len);
+                    if end - start == self.batch_size {
+                        batches_in_bucket.push(bucket_indices[start..end].to_vec());
+                    } else if !self.drop_last {
+                        batches_in_bucket.push(bucket_indices[start..].to_vec());
+                    }
+                    start += self.batch_size;
+                }
+
+                // 3. Shuffle those mini-batches within the bucket, using a
+                //    deterministic RNG seed = base_seed + epoch + bucket_id.
+                if batches_in_bucket.len() > 1 {
+                    let mut rng = StdRng::seed_from_u64(
+                        self.base_seed
+                            .wrapping_add(epoch as u64)
+                            .wrapping_add(bucket_id as u64),
+                    );
+                    batches_in_bucket.shuffle(&mut rng);
+                }
+
+                // 4. Yield the mini-batches for this pre-bucket
+                batches_in_bucket.into_iter()
+            });
+        Box::new(iter)
+    }
+}
+
+/// ============================================================================
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1005,6 +1195,257 @@ mod tests {
             let mut indices: Vec<_> = sampler.iter(0).collect();
             indices.sort_unstable();
             assert_eq!(indices, vec![0, 1, 2, 3, 4]); // Gets all indices
+            Ok(())
+        }
+    }
+
+    mod batch_bucket_sampler_tests {
+        use super::*;
+        use crate::dataset::{DataSource, Dataset, IterableDataset};
+        use crate::readers::TxtSource;
+        use crate::transforms::text::Tokenize;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+        use tokenizers::tokenizer::Tokenizer;
+
+        // Helper function
+        fn create_batch_bucket_sampler(
+            dataset_size: usize,
+            batch_size: usize,
+            bucket_multiplier: usize,
+        ) -> BatchBucketSampler<SequentialSampler, impl Fn(usize) -> f64> {
+            let base_sampler = SequentialSampler::new(dataset_size);
+            let sort_key = |i: usize| i as f64; // Use index as sort key for deterministic tests
+            BatchBucketSampler::new(
+                base_sampler,
+                batch_size,
+                false, // Don't drop last
+                sort_key,
+                bucket_multiplier,
+                TEST_SEED,
+            )
+            .unwrap()
+        }
+
+        #[test]
+        fn create_buckets_successfully() -> Result<()> {
+            let sampler = create_batch_bucket_sampler(100, 8, 4); // bucket_size = 32
+            let epoch = 0;
+            let mut batches = sampler.iter(epoch);
+
+            // First bucket should contain indices 0..32
+            let first_batch = batches.next().unwrap();
+            assert_eq!(first_batch.len(), 8);
+            assert!(first_batch.iter().all(|&x| x < 32));
+            Ok(())
+        }
+
+        #[test]
+        fn sorts_withins_buckets() -> Result<()> {
+            let sampler = create_batch_bucket_sampler(100, 8, 4); // bucket_size = 32
+            let epoch = 0;
+            let batches: Vec<_> = sampler.iter(epoch).collect();
+
+            // Verify sorted order within each *individual mini-batch*
+            for batch in batches {
+                // Each `batch` is a Vec<usize>
+                let mut prev = None;
+                for &idx in batch.iter() {
+                    if let Some(p) = prev {
+                        assert!(
+                            idx <= p,
+                            "Indices must be in descending order within each mini-batch, but saw {} > {}",
+                            idx,
+                            p
+                        );
+                    }
+                    prev = Some(idx);
+                }
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn shuffling_across_batches() -> Result<()> {
+            let sampler = create_batch_bucket_sampler(100, 8, 4);
+            let epoch = 0;
+
+            // Get first bucket's batches
+            let bucket_batches: Vec<_> = sampler.iter(epoch).take(4).collect();
+
+            // Verify batches are shuffled (not sequential)
+            let sequential_order: Vec<_> = (0..8)
+                .rev()
+                .chain(8..16)
+                .rev()
+                .chain(16..24)
+                .rev()
+                .chain(24..32)
+                .rev()
+                .collect();
+            let actual_order: Vec<_> = bucket_batches.iter().flatten().copied().collect();
+
+            assert_ne!(
+                actual_order, sequential_order,
+                "Batches should be shuffled within bucket"
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn deterministic_shuffling_across_epochs() -> Result<()> {
+            let sampler = create_batch_bucket_sampler(100, 8, 4);
+
+            let epoch1: Vec<_> = sampler.iter(1).flatten().collect();
+            let epoch1_repeat: Vec<_> = sampler.iter(1).flatten().collect();
+            let epoch2: Vec<_> = sampler.iter(2).flatten().collect();
+
+            assert_eq!(
+                epoch1, epoch1_repeat,
+                "Same epoch should produce identical sequences"
+            );
+            assert_ne!(
+                epoch1, epoch2,
+                "Different epochs should produce different sequences"
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn partial_buckets_remain() -> Result<()> {
+            let sampler = create_batch_bucket_sampler(50, 8, 4);
+            let epoch = 0;
+
+            let all_indices: Vec<_> = sampler.iter(epoch).flatten().collect();
+            assert_eq!(all_indices.len(), 50, "Should include all indices");
+
+            let last_bucket_start = 32;
+            let last_bucket_indices: Vec<_> = all_indices
+                .iter()
+                .filter(|&&x| x >= last_bucket_start)
+                .copied()
+                .collect();
+            assert_eq!(last_bucket_indices.len(), 18);
+            Ok(())
+        }
+
+        #[test]
+        fn works_with_in_memory_dataset() -> Result<()> {
+            let texts = vec![
+                "short".to_string(),
+                "medium_length".to_string(),
+                "very very long sequence".to_string(),
+                "tiny".to_string(),
+                "another medium".to_string(),
+                "tinyest".to_string(),
+            ];
+
+            let dataset = InMemoryDataset::new(texts.clone());
+            let sampler = BatchBucketSampler::new(
+                SequentialSampler::new(dataset.len()),
+                2,                                        // batch_size
+                false,                                    // drop_last
+                |i| dataset.get(i).unwrap().len() as f64, // sort by string length
+                2,                                        // bucket_multiplier
+                TEST_SEED,
+            )?;
+
+            // Verify that each mini-batch contains similarly-sized sequences
+            for batch_indices in sampler.iter(0) {
+                let batch_strings: Vec<_> = batch_indices
+                    .iter()
+                    .map(|&i| dataset.get(i).unwrap())
+                    .cloned()
+                    .collect();
+                let lengths: Vec<_> = batch_strings.iter().map(|s| s.len()).collect();
+                let max_len = *lengths.iter().max().unwrap();
+                let min_len = *lengths.iter().min().unwrap();
+                assert!(
+                    max_len - min_len <= 10,
+                    "In-memory bucket test: batch lengths too far apart: max={}, min={}",
+                    max_len,
+                    min_len
+                );
+            }
+
+            // Confirm that every item appeared exactly once when flattened
+            let all_indices: Vec<usize> = sampler.iter(0).flatten().collect();
+            assert_eq!(all_indices.len(), dataset.len());
+            let unique_indices: HashSet<_> = all_indices.iter().cloned().collect();
+            assert_eq!(unique_indices.len(), dataset.len());
+            Ok(())
+        }
+
+        #[test]
+        fn works_with_iterable_dataset_and_txt_datasource() -> Result<()> {
+            let mut file = NamedTempFile::new()?;
+            writeln!(file, "short")?;
+            writeln!(file, "medium length line")?;
+            writeln!(file, "this is a very very long line of text")?;
+            writeln!(file, "another medium line")?;
+            writeln!(file, "tiny")?;
+            writeln!(file, "yet another reasonably sized line")?;
+            let path = file.into_temp_path();
+
+            let txt_source = TxtSource::new(&path);
+            let tokenizer = Tokenizer::from_pretrained("bert-base-uncased", None)
+                .map_err(|e| anyhow::anyhow!("Failed to load tokenizer from pretrained: {}", e))?;
+            let transform = Tokenize::new(tokenizer);
+            let dataset =
+                IterableDataset::new(vec![Box::new(txt_source) as Box<dyn DataSource<String>>])
+                    .with_transform(transform);
+
+            let sampler = BatchBucketSampler::new(
+                SequentialSampler::new(6),
+                2, // batch_size
+                false,
+                |i| {
+                    // provide a mock sort key for index i (six lines total):
+                    //   0 (short)  → 4.0
+                    //   1 (medium) → 15.0
+                    //   2 (long)   → 30.0
+                    //   3 (med)    → 14.0
+                    //   4 (tiny)   → 3.0
+                    //   5 (med)    → 25.0
+                    match i {
+                        0 => 4.0,
+                        1 => 15.0,
+                        2 => 30.0,
+                        3 => 14.0,
+                        4 => 3.0,
+                        5 => 25.0,
+                        _ => 0.0,
+                    }
+                },
+                3,         // bucket_multiplier (bucket_size = 2 * 3 = 6)
+                TEST_SEED, // seed
+            )?;
+
+            // Iterate through sampler.iter(0) and, for each mini-batch, pull the data
+            // out of the IterableDataset, tokenizing on the fly. Then verify that within
+            // each batch the tokenized lengths are close to one another.
+            let all_samples: Vec<Sample> = dataset.iter().collect::<Result<_>>()?;
+            let mut total_seen = 0;
+
+            for batch_indices in sampler.iter(0) {
+                let mut batch_token_lens = Vec::new();
+                for &idx in &batch_indices {
+                    let sample = &all_samples[idx];
+                    let tensor = sample.get("input_ids").unwrap();
+                    let token_len = tensor.size()[0] as usize;
+                    batch_token_lens.push(token_len);
+                    total_seen += 1;
+                }
+                let &max_tok = batch_token_lens.iter().max().unwrap();
+                let &min_tok = batch_token_lens.iter().min().unwrap();
+                assert!(
+                    max_tok - min_tok <= 4,
+                    "Line lengths in batch should be similar: max={}, min={}",
+                    max_tok,
+                    min_tok
+                );
+            }
+            assert_eq!(total_seen, all_samples.len());
             Ok(())
         }
     }
