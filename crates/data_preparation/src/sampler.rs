@@ -508,6 +508,150 @@ impl<H: Clone + Send + Sync> Sampler for ShardSampler<H> {
     }
 }
 
+/// ============================================================================
+/// A sampler that partitions a dataset's indices evenly across multiple workers for
+/// parallel training.
+///
+/// # Arguments:
+/// - `dataset_size`: Total number of samples in dataset.
+/// - `num_replicas`: Total number of parallel workers.
+/// - `rank`: Unique ID for this worker. Must satisfy `0 <= rank < num_replicas`.
+/// - `shuffle`: Whether to shuffle the indices.
+/// - `drop_last`: If true, any extra indices beyond an exact multiple of `num_replicas` are dropped.
+///                If false, the list of indices is padded by cycling from the front until its length
+///                is evenly divisible among workers.
+/// - `base_seed`: Master seed shared by all workers.
+///
+/// # Worker allocation
+/// - For dataset with 10 samples across 3 workers:
+/// ```text
+/// Original: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+///
+/// drop_last=true (truncate to 9 samples)
+///   Worker 0: [0, 3, 6]
+///   Worker 1: [1, 4, 7]
+///   Worker 2: [2, 5, 8] // 9 is dropped
+///
+/// drop_last=false (pad to 12 samples)
+///   Worker 0: [0, 3, 6, 9]
+///   Worker 1: [1, 4, 7, 0] // padded with index 0
+///   Worker 2: [2, 5, 8, 1] // padded with index 1
+/// ```
+///
+/// # Deterministic shuffling:
+/// - Each sampler instance uses `base_seed + epoch` to seed its RNG.
+/// - Note: when running N workers, DataLoader should give each worker a different `starting seed`.
+/// - Example usage in DataLoader:
+/// ```ignore
+/// // Suppose base_seed = 42, num_workers = 4
+/// // Worker 0: starting_seed = 42 + 0 = 42
+/// // Worker 1: starting_seed = 42 + 1 = 43
+/// // ...
+/// let sampler_for_worker_i = DistributedSampler::new(
+///     dataset_size, num_workers, i, shuffle, drop_last, starting_seed
+/// )?;
+///
+/// // Then, each epoch:
+/// let indices = sampler_for_worker_i.iter(epoch);  
+/// // Internally seeds RNG with (starting_seed + epoch)
+/// ```
+#[derive(Debug, Clone)]
+pub struct DistributedSampler {
+    dataset_size: usize,
+    num_replicas: usize,
+    rank: usize,
+    shuffle: bool,
+    drop_last: bool,
+    base_seed: u64,
+}
+
+impl DistributedSampler {
+    pub fn new(
+        dataset_size: usize,
+        num_replicas: usize,
+        rank: usize,
+        shuffle: bool,
+        drop_last: bool,
+        base_seed: u64,
+    ) -> Result<Self> {
+        ensure!(dataset_size > 0, "Dataset size must not be empty");
+        ensure!(num_replicas > 0, "Number of workers must be > 0");
+        ensure!(
+            rank < num_replicas,
+            "Invalid rank {rank}, rank should be in the interval [0, {}]",
+            num_replicas.saturating_sub(1)
+        );
+        Ok(Self {
+            dataset_size,
+            num_replicas,
+            rank,
+            shuffle,
+            drop_last,
+            base_seed,
+        })
+    }
+
+    #[inline]
+    fn derive_rng_for_epoch(&self, epoch: usize) -> StdRng {
+        StdRng::seed_from_u64(self.base_seed.wrapping_add(epoch as u64))
+    }
+
+    /// Compute the total number of indices to evenly distribute across workers.
+    ///
+    /// If `drop_last = true`:
+    /// - Truncate to the largest multiple of `num_replicas` that does not exceed `dataset_size`.
+    /// - Example: `dataset_size = 10`, `num_replicas = 3` → truncate to `9` (because `10 % 3 = 1`).
+    ///            The index `9` is dropped before splitting.
+    ///
+    /// If `drop_last = false`:
+    /// - Pad up to the smallest multiple of `num_replicas` that is at least `dataset_size`.
+    /// - Example: `dataset_size = 10`, `num_replicas = 3` → pad to `12` (next multiple of 3).
+    ///             We will append two extra indices (cycling from the front).         
+    fn total_size(&self) -> usize {
+        if self.drop_last {
+            self.dataset_size - (self.dataset_size % self.num_replicas)
+        } else {
+            ((self.dataset_size + self.num_replicas - 1) / self.num_replicas) * self.num_replicas
+        }
+    }
+}
+
+impl Sampler for DistributedSampler {
+    type Item = usize;
+
+    fn iter(&self, epoch: usize) -> Box<dyn Iterator<Item = usize> + Send + '_> {
+        let mut indices: Vec<usize> = (0..self.dataset_size).collect();
+
+        if self.shuffle {
+            indices.shuffle(&mut self.derive_rng_for_epoch(epoch));
+        }
+
+        let total_size = self.total_size();
+
+        if self.drop_last {
+            indices.truncate(total_size);
+        } else if total_size > indices.len() {
+            let padding: Vec<_> = indices
+                .iter()
+                .cycle()
+                .take(total_size - indices.len())
+                .cloned()
+                .collect();
+            indices.extend(padding);
+        }
+
+        // Partition `indices` evenly across `num_replicas`.
+        // Each worker picks every `num_replicas`th element, starting at its own `rank`.
+        // This guarantees disjoint subsets with no overlaps.
+        Box::new(
+            indices
+                .into_iter()
+                .skip(self.rank)
+                .step_by(self.num_replicas),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -788,6 +932,79 @@ mod tests {
             let out1: Vec<_> = sampler.iter(1).collect();
             assert_ne!(out0, out1); // Different permutation per epoch
             assert_eq!(out0, sampler.iter(0).collect::<Vec<_>>()); // Same permutation for same epoch
+            Ok(())
+        }
+    }
+
+    mod distributed_sampler_tests {
+        use super::*;
+
+        #[test]
+        fn rejects_invalid_args() {
+            assert!(DistributedSampler::new(0, 1, 0, false, false, TEST_SEED).is_err()); // dataset_size = 0
+            assert!(DistributedSampler::new(10, 0, 0, false, false, TEST_SEED).is_err()); // num_replicas = 0
+            assert!(DistributedSampler::new(10, 2, 2, false, false, TEST_SEED).is_err());
+            // rank >= num_replicas
+        }
+
+        #[test]
+        fn drop_last_true_truncates_indices() -> Result<()> {
+            // With drop_last = true, should truncate to 9 elements (3 workers x 3 samples)
+            let sampler = DistributedSampler::new(10, 3, 2, false, true, TEST_SEED)?;
+            let indices: Vec<_> = sampler.iter(0).collect();
+            assert_eq!(indices.len(), 3);
+            assert_eq!(indices, vec![2, 5, 8]);
+            Ok(())
+        }
+
+        #[test]
+        fn drop_last_false_correctly_pads_indices_by_cycling() -> Result<()> {
+            // With drop_last = false, should pad to 12 elements (3 workers x 4 samples)
+            let sampler = DistributedSampler::new(10, 3, 2, false, false, TEST_SEED)?;
+            let indices: Vec<_> = sampler.iter(0).collect();
+            assert_eq!(indices, vec![2, 5, 8, 1]); // Last element is padded from front
+            Ok(())
+        }
+
+        #[test]
+        fn shuffles_deterministically() -> Result<()> {
+            let sampler = DistributedSampler::new(100, 4, 0, true, false, TEST_SEED)?;
+
+            // Same epoch = same order
+            let epoch1_a: Vec<_> = sampler.iter(1).collect();
+            let epoch1_b: Vec<_> = sampler.iter(1).collect();
+            assert_eq!(epoch1_a, epoch1_b);
+
+            // Different epoch = different order
+            let epoch2: Vec<_> = sampler.iter(2).collect();
+            assert_ne!(epoch1_a, epoch2);
+            Ok(())
+        }
+
+        #[test]
+        fn no_duplicates_across_workers() -> Result<()> {
+            // Simulate 3 workers with the same dataset
+            let workers = (0..3)
+                .map(|rank| {
+                    DistributedSampler::new(10, 3, rank, true, false, TEST_SEED)
+                        .unwrap()
+                        .iter(0)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+
+            // Verify no overlapping indices between workers
+            let all_indices: HashSet<_> = workers.iter().flatten().collect();
+            assert_eq!(all_indices.len(), 10); // All original indices covered
+            Ok(())
+        }
+
+        #[test]
+        fn single_worker_gets_all_indices() -> Result<()> {
+            let sampler = DistributedSampler::new(5, 1, 0, true, false, TEST_SEED)?;
+            let mut indices: Vec<_> = sampler.iter(0).collect();
+            indices.sort_unstable();
+            assert_eq!(indices, vec![0, 1, 2, 3, 4]); // Gets all indices
             Ok(())
         }
     }
