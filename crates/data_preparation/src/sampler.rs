@@ -21,7 +21,7 @@ use std::collections::HashSet;
 /// Implementations must be `Send + Sync` so the same sampler instance can be
 /// safely shared across DataLoader worker threads.
 pub trait Sampler: Send + Sync {
-    type Item;
+    type Item: Send + Sync;
 
     fn iter(&self, epoch: usize) -> Box<dyn Iterator<Item = Self::Item> + Send + '_>;
 }
