@@ -437,6 +437,77 @@ impl<S: Sampler> Sampler for BatchSampler<S> {
     }
 }
 
+/// ============================================================================
+/// A sampler that iterates over a list of shard handles (e.g., filenames, URLs, offsets),
+/// either in sequential or shuffled order.
+///
+/// If `shuffle = true`, the order is randomized in a deterministic way by seeding an
+/// RNG with `base_seed + epoch`. See `RandomSampler` for details on seed derivation.
+///
+/// # Type parameters:
+/// - `H`: Shard handle type (e.g., `PathBuf`, `String`, `(PathBuf, Offset)`, etc.).
+///        Must implement `Clone + Send + Sync` so it can be cheaply duplicated across workers.
+///
+/// # Arguments:
+/// - `shards`: The list of shard handles to iterate.
+/// - `shuffle`: Whether to shuffle the order every epoch.
+/// - `base_seed`: Master seed.
+///
+/// # Example
+/// ```ignore
+///
+/// // Sequential iteration over Parquet files
+/// let seq_sampler = ShardSampler::new(
+///     vec![
+///         PathBuf::from("data/part1.parquet"),
+///         PathBuf::from("data/part2.parquet"),
+///     ],
+///     false, // shuffle
+///     123, // base seed
+/// );
+///
+/// // Shuffled iteration over S3 URIs
+/// let s3_sampler = ShardSampler::new(
+///     vec![
+///         "s3://bucket/part1".to_string(),
+///         "s3://bucket/part2".to_string(),
+///     ],
+///     true,
+///     42
+/// );
+/// ```
+#[derive(Debug, Clone)]
+pub struct ShardSampler<H: Clone + Send + Sync> {
+    shards: Vec<H>,
+    shuffle: bool,
+    base_seed: u64,
+}
+
+impl<H: Clone + Send + Sync> ShardSampler<H> {
+    pub fn new(shards: Vec<H>, shuffle: bool, base_seed: u64) -> Result<Self> {
+        ensure!(!shards.is_empty(), "Shard list must not be empty");
+        Ok(Self {
+            shards,
+            shuffle,
+            base_seed,
+        })
+    }
+}
+
+impl<H: Clone + Send + Sync> Sampler for ShardSampler<H> {
+    type Item = H;
+
+    fn iter(&self, epoch: usize) -> Box<dyn Iterator<Item = H> + Send + '_> {
+        let mut shards = self.shards.clone();
+
+        if self.shuffle {
+            let mut rng = StdRng::seed_from_u64(self.base_seed.wrapping_add(epoch as u64));
+            shards.shuffle(&mut rng);
+        }
+        Box::new(shards.into_iter())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,6 +755,39 @@ mod tests {
                     expected_value += 1;
                 }
             }
+            Ok(())
+        }
+    }
+
+    mod shard_sampler_tests {
+        use super::*;
+        use std::path::PathBuf;
+
+        #[test]
+        fn rejects_empty_shards() {
+            assert!(ShardSampler::new(Vec::<PathBuf>::new(), false, TEST_SEED).is_err());
+        }
+
+        #[test]
+        fn yields_sequential_order() -> Result<()> {
+            let shards = vec![PathBuf::from("shard1"), PathBuf::from("shard2")];
+            let sampler = ShardSampler::new(shards.clone(), false, 42)?;
+            let collected: Vec<_> = sampler.iter(0).collect();
+            assert_eq!(collected, shards); // Order preserved
+            Ok(())
+        }
+
+        #[test]
+        fn yields_shuffled_order() -> Result<()> {
+            let shards = (0..10)
+                .map(|i| PathBuf::from(format!("shard{}", i)))
+                .collect();
+            let sampler = ShardSampler::new(shards, true, TEST_SEED)?;
+
+            let out0: Vec<_> = sampler.iter(0).collect();
+            let out1: Vec<_> = sampler.iter(1).collect();
+            assert_ne!(out0, out1); // Different permutation per epoch
+            assert_eq!(out0, sampler.iter(0).collect::<Vec<_>>()); // Same permutation for same epoch
             Ok(())
         }
     }
