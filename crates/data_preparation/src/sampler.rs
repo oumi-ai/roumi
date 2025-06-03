@@ -303,6 +303,15 @@ impl WeightedRandomSampler {
             num_samples,
             dataset_size,
         );
+        if !replacement {
+            let positive_count = weights.iter().filter(|&&w| w > 0.0).count();
+            ensure!(
+                num_samples <= positive_count,
+                "num_samples ({}) must be <= number of positive-weight indices ({}) when replacement = false",
+                num_samples,
+                positive_count,
+            );
+        }
 
         Ok(Self {
             _dataset_size: dataset_size,
