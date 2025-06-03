@@ -16,7 +16,7 @@ use std::collections::HashSet;
 /// # Method
 /// - `iter(epoch)`: returns a shuffled sequence for that epoch.
 ///    - Users pass the `epoch` parameter so internally the sampler uses it
-///      together with the base seed to shuffle in a reproducible way across epochs.
+///      together with the base RNG seed to shuffle in a reproducible way across epochs.
 ///
 /// Implementations must be `Send + Sync` so the same sampler instance can be
 /// safely shared across DataLoader worker threads.
@@ -66,7 +66,7 @@ impl Sampler for SequentialSampler {
 ///                  If `false`, each index can only appear once.
 /// - `num_samples`: Number of samples to draw from (defaults to the full-range `dataset_size` if `None`)
 ///                  If `replacement=false`, users must have num_samples <= dataset_size.
-/// - `base_seed`: Master seed.
+/// - `base_seed`: Base RNG seed.
 ///
 /// # Seed Handling
 /// 1. Seeds matter because:
@@ -171,7 +171,7 @@ impl Sampler for RandomSampler {
 /// - `dataset_size`: Total number of samples in a dataset.
 /// - `indices`: The subset of indices to shuffle and sample from. There should be
 ///              no duplicates and each index should be within bounds (`<dataset_size`).
-/// - `base_seed`: Master seed.
+/// - `base_seed`: Base RNG seed.
 ///
 /// # Example
 /// ```ignore
@@ -239,7 +239,7 @@ impl Sampler for SubsetRandomSampler {
 ///                  If `false`, each index can only appear once.
 /// - `num_samples`: Number of samples to draw from (defaults to the full-range `dataset_size` if `None`)
 ///                  If `replacement=false`, users must have num_samples <= dataset_size.
-/// - `base_seed`: Master seed. See `RandomSampler` docs for details.
+/// - `base_seed`: Base RNG seed. See `RandomSampler` docs for details.
 ///
 /// # Example
 /// ```ignore
@@ -460,7 +460,7 @@ impl<S: Sampler> Sampler for BatchSampler<S> {
 /// # Arguments:
 /// - `shards`: The list of shard handles to iterate.
 /// - `shuffle`: Whether to shuffle the order every epoch.
-/// - `base_seed`: Master seed.
+/// - `base_seed`: Base RNG seed.
 ///
 /// # Example
 /// ```ignore
@@ -472,7 +472,7 @@ impl<S: Sampler> Sampler for BatchSampler<S> {
 ///         PathBuf::from("data/part2.parquet"),
 ///     ],
 ///     false, // shuffle
-///     123, // base seed
+///     123, // base RNG seed
 /// );
 ///
 /// // Shuffled iteration over S3 URIs
@@ -529,7 +529,7 @@ impl<H: Clone + Send + Sync> Sampler for ShardSampler<H> {
 /// - `drop_last`: If true, any extra indices beyond an exact multiple of `num_replicas` are dropped.
 ///                If false, the list of indices is padded by cycling from the front until its length
 ///                is evenly divisible among workers.
-/// - `base_seed`: Master seed shared by all workers.
+/// - `base_seed`: Base RNG seed shared by all workers.
 ///
 /// # Worker allocation
 /// - For dataset with 10 samples across 3 workers:
@@ -678,7 +678,7 @@ impl Sampler for DistributedSampler {
 ///               Sorted in descending order: higher key ⇒ earlier in bucket.
 /// - `bucket_size_multiplier`: Multiplier for bucket size. Each bucket’s size is
 ///                             `batch_size * bucket_size_multiplier`. Must be ≥ 1.
-/// - `base_seed`: Master RNG seed for deterministic shuffling.
+/// - `base_seed`: Base RNG seed for deterministic shuffling.
 ///
 /// # Algorithm Overview
 /// 1. Pre-bucketing
@@ -709,7 +709,7 @@ impl Sampler for DistributedSampler {
 /// // 2. Groups indices into buckets of size = 32 * 100 = 3200.
 /// // 3. Sorts each bucket by length (descending).
 /// // 4. Splits into mini‐batches of size 32 (dropping any remainder if `drop_last` is true).
-/// // 5. Shuffles the resulting mini‐batches using a deterministic seed.
+/// // 5. Shuffles the resulting mini‐batches using a deterministic RNG seed.
 /// let sampler = BatchBucketSampler::new(
 ///     SequentialSampler::new(texts.len()),  // base sampler
 ///     32,                                   // batch_size
