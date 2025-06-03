@@ -14,7 +14,7 @@ use std::collections::HashSet;
 ///      a custom handle like `(shard, offset)`.
 ///
 /// # Method
-/// - `iter(epoch)`: returns a shuffled sequence for that epoch.
+/// - `iter(epoch)`: returns a sequential or shuffled sequence for that epoch.
 ///    - Users pass the `epoch` parameter so internally the sampler uses it
 ///      together with the base RNG seed to shuffle in a reproducible way across epochs.
 ///
