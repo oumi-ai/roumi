@@ -518,7 +518,7 @@ where
 }
 
 // ================================================================================================
-// 4a. Iterator for IterableDataset
+// 4b. Iterator for IterableDataset
 // ================================================================================================
 impl<Raw, C> DataLoader<IterableDataset<Raw>, C>
 where
@@ -767,7 +767,7 @@ impl InMemoryWorkerManager {
 }
 
 // ================================================================================================
-// 5a. Worker Management for IterableDataset
+// 5b. Worker Management for IterableDataset
 // ================================================================================================
 /// Manages workers for iterable datasets.
 /// Each worker processes a disjoint subset of data sources.
