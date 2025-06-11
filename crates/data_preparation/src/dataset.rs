@@ -224,6 +224,46 @@ where
         self.transform = Some(Arc::new(transform));
         self
     }
+
+    /// Create an iterator for a subset of sources (for worker distribution)
+    ///
+    /// # Arguments
+    /// * `worker_id` - The worker's ID (0-based)
+    /// * `num_workers` - Total number of workers
+    ///
+    /// # Example
+    /// With 10 sources and 3 workers:
+    /// - Worker 0 gets sources [0, 3, 6, 9]
+    /// - Worker 1 gets sources [1, 4, 7]
+    /// - Worker 2 gets sources [2, 5, 8]
+    pub fn iter_sharded(
+        &self,
+        worker_id: usize,
+        num_workers: usize,
+    ) -> Box<dyn Iterator<Item = Result<Sample>> + Send + '_> {
+        let raw_stream = self
+            .data_sources
+            .iter()
+            .enumerate()
+            .filter(move |(idx, _)| idx % num_workers == worker_id)
+            .flat_map(|(_, source)| {
+                source
+                    .stream()
+                    .unwrap_or_else(|e| Box::new(std::iter::once(Err(e))))
+            });
+
+        match &self.transform {
+            Some(transform) => {
+                let transform = Arc::clone(transform);
+                Box::new(raw_stream.map(move |r| r.and_then(|raw| transform.apply(raw))))
+            }
+            None => Box::new(raw_stream.map(|_| {
+                Err(anyhow!(
+                    "No transform attached. Use `.with_transform()` to specify how to convert raw data into Sample"
+                ))
+            })),
+        }
+    }
 }
 
 impl<Raw> Dataset for IterableDataset<Raw>

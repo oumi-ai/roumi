@@ -1,5 +1,5 @@
 use crate::collator::{Collator, StackCollator};
-use crate::dataset::InMemoryDataset; 
+use crate::dataset::{Dataset, InMemoryDataset, IterableDataset};
 use crate::minibatch::MiniBatch;
 use crate::sample::Sample;
 use crate::sampler::{BatchSampler, Sampler};
@@ -146,7 +146,7 @@ impl DataLoaderConfigBuilder {
 }
 
 // ================================================================================================
-// 3. DataLoader Constructors for InMemoryDataset 
+// 3a. DataLoader Constructors for InMemoryDataset
 // ================================================================================================
 
 impl<Raw> DataLoader<InMemoryDataset<Raw>, StackCollator>
@@ -156,7 +156,7 @@ where
     /// Creates a new DataLoader for in-memory datasets with default StackCollator.
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// let dataloader = DataLoader::new(dataset, sampler, config)?;
     /// ```
     pub fn new(
@@ -226,6 +226,52 @@ where
 }
 
 // ================================================================================================
+// 3b. DataLoadeer Constructor for IterableDataset
+// ================================================================================================
+impl<Raw> DataLoader<IterableDataset<Raw>, StackCollator>
+where
+    Raw: Clone + Send + Sync + 'static,
+{
+    /// Creates  a DataLoader for iterable datasets with the default StackCollator.
+    /// Use this for large datasets that don't fit in memory or infinite data stream.
+    pub fn new_iterable(dataset: IterableDataset<Raw>, config: DataLoaderConfig) -> Result<Self> {
+        Self::new_iterable_with_collator(dataset, config, StackCollator)
+    }
+}
+
+impl<Raw, C> DataLoader<IterableDataset<Raw>, C>
+where
+    Raw: Clone + Send + Sync + 'static,
+    C: Collator + Clone + Send + Sync + 'static,
+{
+    /// Creates a DataLoader for iterable datasets with a custom collator.
+    /// Allows custom batching logic (e.g., PaddingCollator for variable-length sequences).
+    pub fn new_iterable_with_collator(
+        dataset: IterableDataset<Raw>,
+        config: DataLoaderConfig,
+        collator: C,
+    ) -> Result<Self> {
+        let worker_manager = if config.num_workers > 0 {
+            Some(Arc::new(IterableWorkerManager::new(
+                config.num_workers,
+                dataset.clone(),
+                &config,
+            )?))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            dataset,
+            collator,
+            config,
+            current_epoch: std::cell::Cell::new(0),
+            loader_type: LoaderType::Iterable { worker_manager },
+        })
+    }
+}
+
+// ================================================================================================
 // 4. Iterator definition
 // ================================================================================================
 
@@ -260,6 +306,15 @@ enum IteratorImpl<'a, C, Raw> {
     InMemoryMulti {
         worker_manager: Arc<InMemoryWorkerManager>,
         batch_indices: Box<dyn Iterator<Item = Vec<usize>> + Send + 'a>,
+        config: IteratorConfig<'a, C>,
+    },
+    IterableSingle {
+        dataset_iter: Box<dyn Iterator<Item = Result<Sample>> + Send + 'a>,
+        config: IteratorConfig<'a, C>,
+    },
+    IterableMulti {
+        worker_manager: Arc<IterableWorkerManager>,
+        sample_buffer: Vec<Sample>,
         config: IteratorConfig<'a, C>,
     },
 }
@@ -325,12 +380,80 @@ where
                     Err(e) => Some(Err(e)),
                 }
             }
+
+            // Sequential streaming without workers
+            IteratorImpl::IterableSingle {
+                dataset_iter,
+                config,
+            } => {
+                let mut samples = Vec::with_capacity(config.batch_size);
+
+                for _ in 0..config.batch_size {
+                    match dataset_iter.next() {
+                        Some(Ok(sample)) => samples.push(sample),
+                        Some(Err(e)) => return Some(Err(e)),
+                        None => break,
+                    }
+                }
+
+                if samples.is_empty() || (config.drop_last && samples.len() < config.batch_size) {
+                    None
+                } else {
+                    Some(config.collator.collate(&samples))
+                }
+            }
+
+            // Parallel streaming with worker pool
+            IteratorImpl::IterableMulti {
+                worker_manager,
+                sample_buffer,
+                config,
+            } => {
+                while sample_buffer.len() < config.batch_size {
+                    match worker_manager.receive_sample(Duration::from_millis(100)) {
+                        Ok(Ok(sample)) => sample_buffer.push(sample),
+                        Ok(Err(e)) => {
+                            // If we have some samples, return partial batch
+                            if !sample_buffer.is_empty() && !config.drop_last {
+                                break;
+                            }
+                            // Otherwise propagate error with context
+                            return Some(Err(e.context(format!(
+                                "Failed while buffering samples (had {} samples, needed {})",
+                                sample_buffer.len(),
+                                config.batch_size
+                            ))));
+                        }
+                        Err(_) => {
+                            // Timeout is normal when workers finish
+                            break;
+                        }
+                    }
+                }
+
+                if sample_buffer.is_empty()
+                    || (config.drop_last && sample_buffer.len() < config.batch_size)
+                {
+                    None
+                } else {
+                    let batch_end = sample_buffer.len().min(config.batch_size);
+                    let batch: Vec<_> = sample_buffer.drain(0..batch_end).collect();
+
+                    Some(config.collator.collate(&batch)
+                        .with_context(|| format!(
+                            "Failed to collate streaming batch of {} samples (expected batch_size: {})",
+                            batch.len(),
+                            config.batch_size
+                        ))
+                    )
+                }
+            }
         }
     }
 }
 
 // ================================================================================================
-// 4a. Iterator for InMemoryDataset 
+// 4a. Iterator for InMemoryDataset
 // ================================================================================================
 
 impl<Raw, C> DataLoader<InMemoryDataset<Raw>, C>
@@ -390,6 +513,51 @@ where
                 "Internal error: InMemoryDataset has incorrect loader type. \
                              This is a bug in the DataLoader implementation."
             )),
+        }
+    }
+}
+
+// ================================================================================================
+// 4a. Iterator for IterableDataset
+// ================================================================================================
+impl<Raw, C> DataLoader<IterableDataset<Raw>, C>
+where
+    Raw: Clone + Send + Sync + 'static,
+    C: Collator,
+{
+    /// Creates an iterator over batches for iterating datasets.
+    ///
+    /// Note: Iterable datasets do not support shuffling since they have no random access.
+    /// Workers will process data sources in parallel using shard distribution.
+    pub fn iter(&self) -> Result<DataLoaderIter<'_, IterableDataset<Raw>, C>> {
+        let config = IteratorConfig {
+            batch_size: self.config.batch_size,
+            drop_last: self.config.drop_last,
+            collator: &self.collator,
+            timeout: self.config.timeout,
+        };
+
+        match &self.loader_type {
+            LoaderType::Iterable { worker_manager } => {
+                let inner = if let Some(manager) = worker_manager {
+                    IteratorImpl::IterableMulti {
+                        worker_manager: manager.clone(),
+                        sample_buffer: Vec::new(),
+                        config,
+                    }
+                } else {
+                    IteratorImpl::IterableSingle {
+                        dataset_iter: self.dataset.iter(),
+                        config,
+                    }
+                };
+
+                Ok(DataLoaderIter {
+                    _dataset: std::marker::PhantomData,
+                    inner,
+                })
+            }
+            _ => Err(anyhow!("Invalid loader implementation for IterableDataset")),
         }
     }
 }
@@ -483,7 +651,7 @@ impl<Task, Output> Drop for WorkerPool<Task, Output> {
 }
 
 // ================================================================================================
-// 5a. Worker Management for InMemoryDataset 
+// 5a. Worker Management for InMemoryDataset
 // ================================================================================================
 /// Manages workers for in-memory datasets.
 /// Workers share the dataset via Arc to avoid memory duplication.
@@ -598,6 +766,66 @@ impl InMemoryWorkerManager {
     }
 }
 
+// ================================================================================================
+// 5a. Worker Management for IterableDataset
+// ================================================================================================
+/// Manages workers for iterable datasets.
+/// Each worker processes a disjoint subset of data sources.
+struct IterableWorkerManager {
+    worker_pool: WorkerPool<(), Result<Sample>>,
+}
+
+impl IterableWorkerManager {
+    /// Creates an iterable worker manager where each worker processes a subset of data sources.
+    /// Uses shard distribution: worker 0 gets sources [0, N, 2N, ...], worker 1 gets [1, N+1, 2N +1, ...], etc.
+    /// This ensures no duplicate reads and balanced workload across workers.
+    fn new<Raw>(
+        num_workers: usize,
+        dataset: IterableDataset<Raw>,
+        config: &DataLoaderConfig,
+    ) -> Result<Self>
+    where
+        Raw: Clone + Send + Sync + 'static,
+    {
+        let buffer_size = num_workers * config.prefetch_factor * config.batch_size;
+
+        // Distribute data sources among workers
+        let worker_pool = WorkerPool::new(
+            num_workers,
+            buffer_size,
+            move |_task_tx, output_tx, shutdown| {
+                // Get worker ID from thread local (set during worker creation)
+                let worker_id = WORKER_ID.with(|id| *id.borrow());
+
+                // Each worker only iterates through its assigned sources
+                for sample_result in dataset.iter_sharded(worker_id, num_workers) {
+                    if shutdown.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    let sample_result_with_context = sample_result.with_context(|| {
+                        format!("Worker {} failed to load sample from stream", worker_id)
+                    });
+
+                    if output_tx.send(sample_result_with_context).is_err() {
+                        break;
+                    }
+                }
+            },
+        )?;
+        Ok(Self { worker_pool })
+    }
+
+    /// Receives a single sample from any worker in the pool.
+    /// Used to collect samples into mini-batches in the main thread.
+    fn receive_sample(&self, timeout: Duration) -> Result<Result<Sample>> {
+        self.worker_pool
+            .output_rx
+            .recv_timeout(timeout)
+            .map_err(|_| anyhow!("Sample receive timeout"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -663,6 +891,177 @@ mod tests {
         let batches: Vec<_> = dataloader.iter()?.collect::<Result<Vec<_>>>()?;
         assert_eq!(batches.len(), 1); // Only complete batches
         assert_eq!(batches[0].batch_size()?, 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_dataloader_iterable_basic() -> Result<()> {
+        let source = TestDataSource {
+            data: vec!["hello".to_string(), "world".to_string(), "rust".to_string()],
+        };
+        let dataset = IterableDataset::new(vec![Box::new(source) as Box<dyn DataSource<String>>])
+            .with_transform(StringToSample);
+
+        let config = DataLoaderConfig::builder().batch_size(2).build();
+
+        let dataloader = DataLoader::new_iterable(dataset, config)?;
+        let batches: Vec<_> = dataloader.iter()?.collect::<Result<Vec<_>>>()?;
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].batch_size()?, 2);
+        assert_eq!(batches[1].batch_size()?, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_dataloader_iterable_drop_last() -> Result<()> {
+        let source = TestDataSource {
+            data: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        };
+        let dataset = IterableDataset::new(vec![Box::new(source) as Box<dyn DataSource<String>>])
+            .with_transform(StringToSample);
+
+        let config = DataLoaderConfig::builder()
+            .batch_size(2)
+            .drop_last(true)
+            .build();
+
+        let dataloader = DataLoader::new_iterable(dataset, config)?;
+        let batches: Vec<_> = dataloader.iter()?.collect::<Result<Vec<_>>>()?;
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].batch_size()?, 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_dataloader_iterable_multi_worker() -> Result<()> {
+        let source = TestDataSource {
+            data: vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "d".to_string(),
+            ],
+        };
+        let dataset = IterableDataset::new(vec![Box::new(source) as Box<dyn DataSource<String>>])
+            .with_transform(StringToSample);
+
+        let config = DataLoaderConfig::builder()
+            .batch_size(2)
+            .num_workers(2)
+            .build();
+
+        let dataloader = DataLoader::new_iterable(dataset, config)?;
+        let batches: Vec<_> = dataloader.iter()?.collect::<Result<Vec<_>>>()?;
+
+        assert!(batches.len() >= 2);
+        Ok(())
+    }
+
+    #[test]
+    fn test_dataloader_iterable_with_collator() -> Result<()> {
+        let source = TestDataSource {
+            data: vec!["test1".to_string(), "test2".to_string()],
+        };
+        let dataset = IterableDataset::new(vec![Box::new(source) as Box<dyn DataSource<String>>])
+            .with_transform(StringToSample);
+
+        let config = DataLoaderConfig::builder().batch_size(1).build();
+
+        let dataloader = DataLoader::new_iterable_with_collator(dataset, config, StackCollator)?;
+
+        let batches: Vec<_> = dataloader.iter()?.collect::<Result<Vec<_>>>()?;
+        assert_eq!(batches.len(), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_dataloader_epoch_determinism() -> Result<()> {
+        let data = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+        let dataset = InMemoryDataset::new(data).with_transform(StringToSample);
+        let sampler = SequentialSampler::new(dataset.len());
+
+        let config = DataLoaderConfig::builder()
+            .batch_size(2)
+            .shuffle(true)
+            .build();
+
+        let dataloader = DataLoader::new(dataset, sampler, config)?;
+
+        let epoch0_batch1: Vec<_> = dataloader.iter()?.collect::<Result<Vec<_>>>()?;
+        let epoch0_batch2: Vec<_> = dataloader.iter()?.collect::<Result<Vec<_>>>()?;
+
+        assert_eq!(epoch0_batch1.len(), epoch0_batch2.len());
+        Ok(())
+    }
+
+    #[test]
+    fn test_dataloader_single_vs_multi_worker() -> Result<()> {
+        let data = vec![
+            "hello".to_string(),
+            "world".to_string(),
+            "rust".to_string(),
+            "test".to_string(),
+        ];
+        let dataset = InMemoryDataset::new(data.clone()).with_transform(StringToSample);
+        let sampler = SequentialSampler::new(dataset.len());
+
+        // Single-threaded
+        let config_single = DataLoaderConfig::builder()
+            .batch_size(2)
+            .num_workers(0)
+            .build();
+        let dataloader_single = DataLoader::new(dataset.clone(), sampler.clone(), config_single)?;
+        let batches_single: Vec<_> = dataloader_single.iter()?.collect::<Result<Vec<_>>>()?;
+
+        // Multi-threaded
+        let dataset2 = InMemoryDataset::new(data).with_transform(StringToSample);
+        let sampler2 = SequentialSampler::new(dataset2.len());
+        let config_multi = DataLoaderConfig::builder()
+            .batch_size(2)
+            .num_workers(2)
+            .build();
+        let dataloader_multi = DataLoader::new(dataset2, sampler2, config_multi)?;
+        let batches_multi: Vec<_> = dataloader_multi.iter()?.collect::<Result<Vec<_>>>()?;
+
+        assert_eq!(batches_single.len(), batches_multi.len());
+        assert_eq!(batches_single.len(), 2);
+
+        for (single_batch, multi_batch) in batches_single.iter().zip(batches_multi.iter()) {
+            assert_eq!(single_batch.batch_size()?, multi_batch.batch_size()?);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_builder_pattern() -> Result<()> {
+        let data = vec!["test".to_string()];
+        let dataset = InMemoryDataset::new(data).with_transform(StringToSample);
+        let sampler = SequentialSampler::new(dataset.len());
+
+        let config = DataLoaderConfig::builder()
+            .batch_size(1)
+            .num_workers(4)
+            .timeout(Duration::from_secs(60))
+            .prefetch_factor(3)
+            .build();
+
+        let dataloader = DataLoader::new(dataset, sampler, config)?;
+
+        // Can't access config directly, but we can verify it works
+        let batches: Vec<_> = dataloader.iter()?.collect::<Result<Vec<_>>>()?;
+        assert_eq!(batches.len(), 1);
 
         Ok(())
     }
