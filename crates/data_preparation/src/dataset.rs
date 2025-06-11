@@ -1,7 +1,7 @@
 use crate::sample::Sample;
 use crate::transforms::Transform;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -96,6 +96,33 @@ where
     /// Random-access lookup by index
     pub fn get(&self, index: usize) -> Option<&Raw> {
         self.raw_data.get(index)
+    }
+
+    /// Direct O(1) access to a sample by index with transform applied.
+    ///
+    /// This enables efficient random access for DataLoader workers without
+    /// pre-caching all samples. The transform is applied on-demand.
+    ///
+    /// # Errors
+    /// - Returns error if index is out of bounds.
+    /// - Returns error if no transform is attached.
+    pub fn get_sample(&self, index: usize) -> Result<Sample> {
+        let raw = self.raw_data.get(index).ok_or_else(|| {
+            anyhow!(
+                "Index {} out of bounds (dataset size {})",
+                index,
+                self.len()
+            )
+        })?;
+
+        match &self.transform {
+            Some(transform) => transform
+                .apply(raw.clone())
+                .with_context(|| format!("Transform failed for sample at index {}", index)),
+            None => Err(anyhow!(
+                "No transform attached. Use `.with_transform()` to specify how to convert raw data into Sample" 
+            )),
+        }
     }
 
     /// Adds metadata (e.g., "source", "split")
