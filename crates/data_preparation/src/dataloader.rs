@@ -1065,4 +1065,135 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_transform_error_propagation() -> Result<()> {
+        struct FailingTransform;
+        impl Transform<String, Sample> for FailingTransform {
+            fn apply(&self, _: String) -> Result<Sample> {
+                Err(anyhow!("Transform failed"))
+            }
+        }
+
+        let dataset =
+            InMemoryDataset::new(vec!["test".to_string()]).with_transform(FailingTransform);
+        let sampler = SequentialSampler::new(1);
+        let config = DataLoaderConfig::default();
+
+        let dataloader = DataLoader::new(dataset, sampler, config)?;
+        let result = dataloader.iter()?.next().unwrap();
+        assert!(result.is_err());
+
+        // Check error chain
+        let err = result.unwrap_err();
+        let error_chain = err.chain().map(|e| e.to_string()).collect::<Vec<_>>();
+        assert!(
+            error_chain.iter().any(|e| e.contains("Transform failed")),
+            "Expected 'Transform failed' in error chain, but got: {:?}",
+            error_chain
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_worker_shutdown_cleanup() -> Result<()> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        // Track how many samples were processed
+        let process_count = Arc::new(AtomicUsize::new(0));
+
+        #[derive(Clone)]
+        struct CountingTransform {
+            counter: Arc<AtomicUsize>,
+        }
+
+        impl Transform<String, Sample> for CountingTransform {
+            fn apply(&self, s: String) -> Result<Sample> {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                // Add small delay to make timing more predictable
+                std::thread::sleep(Duration::from_millis(10));
+                Ok(Sample::from_single("data", Tensor::from(s.len() as i64)))
+            }
+        }
+
+        let transform = CountingTransform {
+            counter: process_count.clone(),
+        };
+
+        // Test that dropiing loader stops all processing
+        {
+            let dataset =
+                InMemoryDataset::new((0..100).map(|i| format!("item{}", i)).collect::<Vec<_>>())
+                    .with_transform(transform.clone());
+
+            let loader = DataLoader::new(
+                dataset,
+                SequentialSampler::new(100),
+                DataLoaderConfig::builder()
+                    .batch_size(1)
+                    .num_workers(2)
+                    .prefetch_factor(1) // Minimal prefetch
+                    .build(),
+            )?;
+
+            // Start iteration but only consume first batch
+            let mut iter = loader.iter()?;
+            let _first = iter.next().unwrap()?;
+
+            // Record count after first batch
+            let count_after_first = process_count.load(Ordering::SeqCst);
+            assert!(
+                count_after_first >= 1,
+                "Should have processed at least 1 item"
+            );
+
+            // Drop everything (loader and iterator)
+            drop(iter);
+            drop(loader);
+        } // Everything cleaned up here
+
+        // Give time for any lingering worker threads to finish
+        std::thread::sleep(Duration::from_millis(200));
+
+        let final_count = process_count.load(Ordering::SeqCst);
+
+        // Workers should have stopped early, not processed all 100 items
+        assert!(
+            final_count < 50,
+            "Workers should have stopped early, but processed {} items",
+            final_count
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_worker_timeout() -> Result<()> {
+        struct SlowTransform;
+        impl Transform<String, Sample> for SlowTransform {
+            fn apply(&self, _: String) -> Result<Sample> {
+                std::thread::sleep(Duration::from_secs(1));
+                Ok(Sample::from_single("data", Tensor::from_slice(&[0])))
+            }
+        }
+
+        let dataset = InMemoryDataset::new(vec!["a".to_string()]).with_transform(SlowTransform);
+
+        let config = DataLoaderConfig::builder()
+            .num_workers(1)
+            .timeout(Duration::from_millis(10))
+            .build();
+
+        let loader = DataLoader::new(dataset, SequentialSampler::new(1), config)?;
+        let mut iter = loader.iter()?;
+
+        match iter.next() {
+            Some(Err(e)) => {
+                assert!(e.to_string().contains("timeout"));
+                Ok(())
+            }
+            _ => Err(anyhow!("Expected timeout error")),
+        }
+    }
 }
