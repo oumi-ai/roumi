@@ -315,7 +315,7 @@ enum IteratorImpl<'a, C, Raw> {
         config: IteratorConfig<'a, C>,
     },
     IterableMulti {
-        worker_manager: Arc<IterableWorkerManager>,
+        worker_pool: WorkerPool<(), Result<Sample>>,
         sample_buffer: Vec<Sample>,
         config: IteratorConfig<'a, C>,
     },
@@ -431,12 +431,15 @@ where
 
             // Parallel streaming with worker pool
             IteratorImpl::IterableMulti {
-                worker_manager,
+                worker_pool,
                 sample_buffer,
                 config,
             } => {
                 while sample_buffer.len() < config.batch_size {
-                    match worker_manager.receive_sample(Duration::from_millis(100)) {
+                    match worker_pool
+                        .output_rx
+                        .recv_timeout(Duration::from_millis(100))
+                    {
                         Ok(Ok(sample)) => sample_buffer.push(sample),
                         Ok(Err(e)) => {
                             // If we have some samples, return partial batch
@@ -568,9 +571,43 @@ where
 
         match &self.loader_type {
             LoaderType::Iterable { worker_manager } => {
-                let inner = if let Some(manager) = worker_manager {
+                let inner = if let Some(_manager) = worker_manager {
+                    // Create fresh workers for this iteration
+                    // TODO: Future optimization - use persistent_workers from manager
+                    let buffer_size = self.config.num_workers
+                        * self.config.prefetch_factor
+                        * self.config.batch_size;
+                    let dataset = self.dataset.clone();
+                    let num_workers = self.config.num_workers;
+
+                    // Uses shard distribution: worker 0 gets sources [0, N, 2N, ...], worker 1 gets [1, N+1, 2N +1, ...], etc.
+                    // This ensures no duplicate reads and balanced workload across workers.
+                    let worker_pool = WorkerPool::new(
+                        num_workers,
+                        buffer_size,
+                        move |_task_rx, output_tx, shutdown| {
+                            let worker_id = WORKER_ID.with(|id| *id.borrow());
+
+                            for sample_result in dataset.iter_sharded(worker_id, num_workers) {
+                                if shutdown.load(Ordering::Relaxed) {
+                                    break;
+                                }
+
+                                let sample_result_with_context = sample_result.with_context(|| {
+                                    format!(
+                                        "Worker {} failed to load sample from stream",
+                                        worker_id
+                                    )
+                                });
+
+                                if output_tx.send(sample_result_with_context).is_err() {
+                                    break;
+                                }
+                            }
+                        },
+                    )?;
                     IteratorImpl::IterableMulti {
-                        worker_manager: manager.clone(),
+                        worker_pool,
                         sample_buffer: Vec::new(),
                         config,
                     }
@@ -798,60 +835,23 @@ impl InMemoryWorkerManager {
 // ================================================================================================
 // 5b. Worker Management for IterableDataset
 // ================================================================================================
-/// Manages workers for iterable datasets.
-/// Each worker processes a disjoint subset of data sources.
+/// Placeholder for future persistent worker implementation.
 struct IterableWorkerManager {
-    worker_pool: WorkerPool<(), Result<Sample>>,
+    // Remove the worker_pool field - we will create workers fresh for each iteration for now.
+    // TODO: implement persistent_workers that can be reused across iterations.
 }
 
 impl IterableWorkerManager {
-    /// Creates an iterable worker manager where each worker processes a subset of data sources.
-    /// Uses shard distribution: worker 0 gets sources [0, N, 2N, ...], worker 1 gets [1, N+1, 2N +1, ...], etc.
-    /// This ensures no duplicate reads and balanced workload across workers.
+    // Placeholder constructor - actual worker creation happens in DataLoader::iter()
     fn new<Raw>(
-        num_workers: usize,
-        dataset: IterableDataset<Raw>,
-        config: &DataLoaderConfig,
+        _num_workers: usize,
+        _dataset: IterableDataset<Raw>,
+        _config: &DataLoaderConfig,
     ) -> Result<Self>
     where
         Raw: Clone + Send + Sync + 'static,
     {
-        let buffer_size = num_workers * config.prefetch_factor * config.batch_size;
-
-        // Distribute data sources among workers
-        let worker_pool = WorkerPool::new(
-            num_workers,
-            buffer_size,
-            move |_task_tx, output_tx, shutdown| {
-                // Get worker ID from thread local (set during worker creation)
-                let worker_id = WORKER_ID.with(|id| *id.borrow());
-
-                // Each worker only iterates through its assigned sources
-                for sample_result in dataset.iter_sharded(worker_id, num_workers) {
-                    if shutdown.load(Ordering::Relaxed) {
-                        break;
-                    }
-
-                    let sample_result_with_context = sample_result.with_context(|| {
-                        format!("Worker {} failed to load sample from stream", worker_id)
-                    });
-
-                    if output_tx.send(sample_result_with_context).is_err() {
-                        break;
-                    }
-                }
-            },
-        )?;
-        Ok(Self { worker_pool })
-    }
-
-    /// Receives a single sample from any worker in the pool.
-    /// Used to collect samples into mini-batches in the main thread.
-    fn receive_sample(&self, timeout: Duration) -> Result<Result<Sample>> {
-        self.worker_pool
-            .output_rx
-            .recv_timeout(timeout)
-            .map_err(|_| anyhow!("Sample receive timeout"))
+        Ok(Self {})
     }
 }
 
