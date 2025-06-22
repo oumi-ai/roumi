@@ -283,6 +283,7 @@ struct IteratorConfig<'a, C> {
     drop_last: bool,
     collator: &'a C,
     timeout: Duration,
+    prefetch_factor: usize, 
 }
 
 /// Iterator over batches of data.
@@ -307,6 +308,7 @@ enum IteratorImpl<'a, C, Raw> {
         worker_manager: Arc<InMemoryWorkerManager>,
         batch_indices: Box<dyn Iterator<Item = Vec<usize>> + Send + 'a>,
         config: IteratorConfig<'a, C>,
+        pending_tasks: usize, 
     },
     IterableSingle {
         dataset_iter: Box<dyn Iterator<Item = Result<Sample>> + Send + 'a>,
@@ -369,15 +371,39 @@ where
                 worker_manager,
                 batch_indices,
                 config,
+                pending_tasks,
             } => {
-                let indices = batch_indices.next()?;
-
-                if let Err(e) = worker_manager.send_task(indices) {
-                    return Some(Err(e));
+                // Keep the pipeline full up to prefetch_factor
+                while *pending_tasks < config.prefetch_factor {
+                    match batch_indices.next() {
+                        Some(indices) => {
+                            let batch_size = indices.len();
+                            if let Err(e) = worker_manager.send_task(indices) {
+                                return Some(Err(e.context(format!(
+                                    "Failed to send batch of {} indices to workers (pending tasks: {})",
+                                    batch_size, *pending_tasks
+                                ))));
+                            }
+                            *pending_tasks += 1;
+                        }
+                        None => break,
+                    }
                 }
-                match worker_manager.receive_task_result(config.timeout) {
-                    Ok(result) => Some(result),
-                    Err(e) => Some(Err(e)),
+
+                // If we have pending tasks, receive one
+                if *pending_tasks > 0 {
+                    match worker_manager.receive_task_result(config.timeout) {
+                        Ok(result) => {
+                            *pending_tasks -= 1;
+                            Some(result)
+                        }
+                        Err(e) => Some(Err(e.context(format!(
+                            "Failed to receive batch from workers (pending tasks: {}, timeout: {:?})",
+                            *pending_tasks, config.timeout
+                        )))),
+                    }
+                } else {
+                    None
                 }
             }
 
@@ -479,6 +505,7 @@ where
             drop_last: self.config.drop_last,
             collator: &self.collator,
             timeout: self.config.timeout,
+            prefetch_factor: self.config.prefetch_factor, 
         };
 
         match &self.loader_type {
@@ -494,6 +521,7 @@ where
                         worker_manager: manager.clone(),
                         batch_indices,
                         config,
+                        pending_tasks: 0, 
                     }
                 } else {
                     // Single-threaded: no caching, fetch on demand
@@ -535,6 +563,7 @@ where
             drop_last: self.config.drop_last,
             collator: &self.collator,
             timeout: self.config.timeout,
+            prefetch_factor: self.config.prefetch_factor,
         };
 
         match &self.loader_type {
