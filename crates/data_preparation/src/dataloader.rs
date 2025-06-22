@@ -283,7 +283,7 @@ struct IteratorConfig<'a, C> {
     drop_last: bool,
     collator: &'a C,
     timeout: Duration,
-    prefetch_factor: usize, 
+    prefetch_factor: usize,
 }
 
 /// Iterator over batches of data.
@@ -308,7 +308,7 @@ enum IteratorImpl<'a, C, Raw> {
         worker_manager: Arc<InMemoryWorkerManager>,
         batch_indices: Box<dyn Iterator<Item = Vec<usize>> + Send + 'a>,
         config: IteratorConfig<'a, C>,
-        pending_tasks: usize, 
+        pending_tasks: usize,
     },
     IterableSingle {
         dataset_iter: Box<dyn Iterator<Item = Result<Sample>> + Send + 'a>,
@@ -505,7 +505,7 @@ where
             drop_last: self.config.drop_last,
             collator: &self.collator,
             timeout: self.config.timeout,
-            prefetch_factor: self.config.prefetch_factor, 
+            prefetch_factor: self.config.prefetch_factor,
         };
 
         match &self.loader_type {
@@ -521,7 +521,7 @@ where
                         worker_manager: manager.clone(),
                         batch_indices,
                         config,
-                        pending_tasks: 0, 
+                        pending_tasks: 0,
                     }
                 } else {
                     // Single-threaded: no caching, fetch on demand
