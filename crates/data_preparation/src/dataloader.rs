@@ -5,7 +5,7 @@ use crate::sample::Sample;
 use crate::sampler::{BatchSampler, Sampler};
 use anyhow::{anyhow, Context, Result};
 use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -80,7 +80,7 @@ pub struct DataLoader<D, C = StackCollator> {
     dataset: D,
     collator: C,
     config: DataLoaderConfig,
-    current_epoch: std::cell::Cell<usize>,
+    current_epoch: AtomicUsize,
     loader_type: LoaderType,
 }
 
@@ -297,7 +297,7 @@ where
             dataset,
             collator,
             config,
-            current_epoch: std::cell::Cell::new(0),
+            current_epoch: AtomicUsize::new(0),
             loader_type: LoaderType::InMemory {
                 batch_sampler: Box::new(batch_sampler),
                 worker_manager,
@@ -404,7 +404,7 @@ where
             dataset,
             collator,
             config,
-            current_epoch: std::cell::Cell::new(0),
+            current_epoch: AtomicUsize::new(0),
             loader_type: LoaderType::InMemory {
                 batch_sampler: Box::new(batch_sampler),
                 worker_manager,
@@ -473,7 +473,7 @@ where
             dataset,
             collator,
             config,
-            current_epoch: std::cell::Cell::new(0),
+            current_epoch: AtomicUsize::new(0),
             loader_type: LoaderType::Iterable { worker_manager },
         })
     }
@@ -735,8 +735,8 @@ where
     pub fn iter(&self) -> Result<DataLoaderIter<'_, InMemoryDataset<Raw>, C, Raw>> {
         // Update epoch for shuffling
         let epoch = if self.config.shuffle {
-            let current = self.current_epoch.get();
-            self.current_epoch.set(current + 1);
+            let current = self.current_epoch.load(Ordering::SeqCst);
+            self.current_epoch.store(current + 1, Ordering::SeqCst);
             current
         } else {
             0
