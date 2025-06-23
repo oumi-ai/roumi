@@ -10,6 +10,54 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+/// This module implements the `DataLoader` that efficiently loads data,
+/// with support for both in-memory and iterable datasets.
+///
+/// The `DataLoader` coordinates the following components:
+/// - `Dataset`: Provide data access (in-memory or iterable)
+/// - `Sampler`: Control iteration order (e.g., sequential, random, bucketed)
+/// - `Collator`: Batch samples together (e.g., stacking, padding)
+///
+/// Internally, the `DataLoader` uses a worker management system that coordinates
+/// parallel data loading for improved throughput:
+/// - WorkerManager: Coordinates task distribution and result collection between the main thread and workers,
+/// - WorkerPool: Manages the lifecycle of worker threads and their communication channels.
+///
+/// # Example usage
+/// ```ignore
+/// let dataset = InMemoryDataset::new(data).with_transform(transform);
+/// let sampler = SequentialSampler::new(dataset.len());
+/// let config = DataLoaderConfig::builder()
+///     .batch_size(32)
+///     .num_workers(4)
+///     .build();
+///
+/// let loader = DataLoader::new(dataset, sampler, config)?;
+/// for batch in loader.iter()? {
+///     let batch = batch?;
+///     // Process batch...
+/// }
+/// ```
+///
+/// # Performance considerations
+///
+/// ## Worker Configuration
+/// - `num_workers = 0`: Single-threaded
+/// - `num_workers > 0`: Parallel loading
+///
+/// ## Guidelines for setting `num_workers`:  
+/// - For I/O bound workloads (e.g., loading from disk/network), use num_workers = 2-4x CPU cores
+/// - For CPU-bound workloads (e.g., heavy transforms), use num_workers = all CPU cores
+/// - For mixed workloads, start with 4 workers and tune based on profiling.
+///
+/// ## Memory usage
+/// - Single-threaded: O(batch_size) - minimal memory footprint
+/// - Multi-threaded: O(num_workers x prefetch_factor x batch_size)
+///
+/// ## Optimization notes:
+/// - Enable `shuffle = true` for better model generalization
+/// - Use `drop_last = true` for consistent batch sizes in training.
+
 // ================================================================================================
 // 1. Core Types (DataLoader, LoaderType)
 // ================================================================================================
@@ -19,6 +67,15 @@ use std::time::Duration;
 /// Supports two modes:
 /// - In-memory: Random access with sampling strategies
 /// - Iterable: Sequential access with shard distribution
+///
+/// # Thread safety:
+/// - `DataLoader` itself is Send + Sync and can be shared across threads.
+/// - Iterators are not Send and must be used on a single thread.
+/// - Multiple iterators can be created from the same DataLoader safely.
+///
+/// # Type parameters:
+/// - `D`: Dataset type (InMemoryDataset or IterableDataset)
+/// - `C`: Collator type (defaults to StackCollator)
 pub struct DataLoader<D, C = StackCollator> {
     dataset: D,
     collator: C,
@@ -65,9 +122,11 @@ pub struct DataLoaderConfig {
     pub shuffle: bool,
     /// Number of batches to prefetch per worker
     pub prefetch_factor: usize,
-    /// Timeout for batch operations
+    /// Timeout for batch operations.
+    /// Prevents indefinite blocking if workers stall.
     pub timeout: Duration,
-    /// Timeout for worker receive operations
+    /// Timeout for worker receive operations.
+    /// Controls how often workers check for shutdown.
     pub worker_timeout: Duration,
 }
 
@@ -91,7 +150,7 @@ impl DataLoaderConfig {
     }
 }
 
-/// Builder for DataLoaderConfig
+/// Builder for DataLoaderConfig with method chaining
 #[derive(Default)]
 pub struct DataLoaderConfigBuilder {
     config: DataLoaderConfig,
@@ -128,18 +187,23 @@ impl DataLoaderConfigBuilder {
         self
     }
 
-    /// Set the timeout for batch operations
+    /// Set the timeout for batch operations.
+    ///
+    /// - Too low: May cancel batches during legitimate heavy processing
+    /// - Too high: Delays detection of stuck workers.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.config.timeout = timeout;
         self
     }
 
     /// Set the worker timeout for receiving operations
+    /// Lower values = more responsive shutdown, higher CPU usage.
     pub fn worker_timeout(mut self, worker_timeout: Duration) -> Self {
         self.config.worker_timeout = worker_timeout;
         self
     }
 
+    /// Build the final configuration.
     pub fn build(self) -> DataLoaderConfig {
         self.config
     }
@@ -154,6 +218,11 @@ where
     Raw: Clone + Send + Sync + 'static,
 {
     /// Creates a new DataLoader for in-memory datasets with default StackCollator.
+    ///
+    /// # Errors:
+    /// - Returns error if `batch_size` is 0
+    /// - Returns error if `prefetch_factor` is 0 when using workers
+    /// - Worker thread creation failure
     ///
     /// # Example
     /// ```ignore
@@ -180,6 +249,14 @@ where
     /// - `sampler`: Sampling strategy (e.g., SequentialSampler, RandomSampler)
     /// - `config`: DataLoader configuration
     /// - `collator`: Custom collator for batching samples
+    ///
+    /// # Errors
+    /// - Returns error if `batch_size` is 0
+    /// - Returns error if `prefetch_factor` is 0 when using workers
+    /// - Worker thread creation failure
+    ///
+    /// # Thread safety
+    /// The dataset is wrapped in Arc for zero-copy sharing across workers.
     pub fn new_with_collator(
         dataset: InMemoryDataset<Raw>,
         sampler: impl Sampler<Item = usize> + Send + Sync + 'static,
@@ -197,17 +274,21 @@ where
             ));
         }
 
-        let batch_sampler = BatchSampler::new(sampler, config.batch_size, config.drop_last)?;
+        let batch_sampler = BatchSampler::new(sampler, config.batch_size, config.drop_last)
+            .context("Failed to wrap sampler with BaseSampler")?;
 
         let worker_manager = if config.num_workers > 0 {
             // Wrap dataset in Arc for sharing across workers
             let shared_dataset = Arc::new(dataset.clone());
-            Some(Arc::new(InMemoryWorkerManager::new(
-                config.num_workers,
-                shared_dataset,
-                collator.clone(),
-                &config,
-            )?))
+            Some(Arc::new(
+                InMemoryWorkerManager::new(
+                    config.num_workers,
+                    shared_dataset,
+                    collator.clone(),
+                    &config,
+                )
+                .context("Failed to initialize worker manager")?,
+            ))
         } else {
             None
         };
@@ -306,12 +387,15 @@ where
 
         let worker_manager = if config.num_workers > 0 {
             let shared_dataset = Arc::new(dataset.clone());
-            Some(Arc::new(InMemoryWorkerManager::new(
-                config.num_workers,
-                shared_dataset,
-                collator.clone(),
-                &config,
-            )?))
+            Some(Arc::new(
+                InMemoryWorkerManager::new(
+                    config.num_workers,
+                    shared_dataset,
+                    collator.clone(),
+                    &config,
+                )
+                .context("Failed to initialize worker pool")?,
+            ))
         } else {
             None
         };
@@ -328,6 +412,7 @@ where
         })
     }
 }
+
 // ================================================================================================
 // 3b. DataLoadeer Constructor for IterableDataset
 // ================================================================================================
@@ -336,7 +421,11 @@ where
     Raw: Clone + Send + Sync + 'static,
 {
     /// Creates  a DataLoader for iterable datasets with the default StackCollator.
-    /// Use this for large datasets that don't fit in memory or infinite data stream.
+    ///
+    /// Use this for large datasets that don't fit in memory or infinite data streams.
+    ///
+    /// # Note:
+    /// IterableDataset do not support generic index-based shuffling or random access.
     pub fn new_iterable(dataset: IterableDataset<Raw>, config: DataLoaderConfig) -> Result<Self> {
         Self::new_iterable_with_collator(dataset, config, StackCollator)
     }
@@ -348,18 +437,34 @@ where
     C: Collator + Clone + Send + Sync + 'static,
 {
     /// Creates a DataLoader for iterable datasets with a custom collator.
+    ///
     /// Allows custom batching logic (e.g., PaddingCollator for variable-length sequences).
+    ///
+    /// # Worker Distribution
+    /// Uses round-robin shard distribution across data sources:
+    /// - Worker 0 processes sources [0, N, 2N, ...] where N = num_workers
+    /// - Worker 1 processes sources [1, N+1, 2N+1, ...]
+    /// - etc.
+    ///
+    /// This ensures:
+    /// 1. No duplicate reads across workers
+    /// 2. Balanced workload when sources have similar sizes
+    /// 3. Deterministic assignment for reproducibility
+    ///
+    /// Example with 3 workers and 7 sources:
+    /// - Worker 0: sources [0, 3, 6]
+    /// - Worker 1: sources [1, 4]
+    /// - Worker 2: sources [2, 5]
     pub fn new_iterable_with_collator(
         dataset: IterableDataset<Raw>,
         config: DataLoaderConfig,
         collator: C,
     ) -> Result<Self> {
         let worker_manager = if config.num_workers > 0 {
-            Some(Arc::new(IterableWorkerManager::new(
-                config.num_workers,
-                dataset.clone(),
-                &config,
-            )?))
+            Some(Arc::new(
+                IterableWorkerManager::new(config.num_workers, dataset.clone(), &config)
+                    .context("Failed to create worker manager for iterable dataset")?,
+            ))
         } else {
             None
         };
@@ -392,31 +497,47 @@ struct IteratorConfig<'a, C> {
 /// Iterator over batches of data.
 ///
 /// Created by calling `dataloader.iter()`.
+///
+/// # Lifetime
+/// Borrows the DataLoader for the iteration duration.
+/// Multiple iterators can exist simultaneously.
+///
+/// # Thread safety
+/// Iterators are not Send - use on a single thread only.
 pub struct DataLoaderIter<'a, D, C, Raw = ()> {
     _dataset: std::marker::PhantomData<D>,
     inner: IteratorImpl<'a, C, Raw>,
 }
 
 /// Internal iterator implementation variants for different dataset/threading combinations.
+///
 /// Separates concerns between:
 /// - Dataset type: InMemory(index-based) vs Iterable(sequential)
 /// - Threading: Single(simple path) vs Multi(worker pool)
 enum IteratorImpl<'a, C, Raw> {
+    /// Single-threaded in-memory iteration.
+    /// Fetches samples on-demand without prefetching.
     InMemorySingle {
         dataset: &'a InMemoryDataset<Raw>,
         batch_indices: Box<dyn Iterator<Item = Vec<usize>> + Send + 'a>,
         config: IteratorConfig<'a, C>,
     },
+    /// Multi-threaded in-memory iteration
+    /// Workers prefetch batches for better throughput.
     InMemoryMulti {
         worker_manager: Arc<InMemoryWorkerManager>,
         batch_indices: Box<dyn Iterator<Item = Vec<usize>> + Send + 'a>,
         config: IteratorConfig<'a, C>,
         pending_tasks: usize,
     },
+    /// Single-threaded streaming iteration.
+    /// Simple sequential processing.
     IterableSingle {
         dataset_iter: Box<dyn Iterator<Item = Result<Sample>> + Send + 'a>,
         config: IteratorConfig<'a, C>,
     },
+    /// Multi-threaded streaming iteration.
+    /// Workers process shards in parallel.
     IterableMulti {
         worker_pool: WorkerPool<(), Result<Sample>>,
         sample_buffer: Vec<Sample>,
@@ -434,7 +555,7 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         match &mut self.inner {
-            // Single-threaded path: fetch samples directly
+            // Single-threaded path: fetch samples directly using O(1) `get_sample(index)`
             IteratorImpl::InMemorySingle {
                 dataset,
                 batch_indices,
@@ -469,7 +590,7 @@ where
                 }
             }
 
-            // Multi-threaded path: delegate to workers
+            // Multi-threaded path: delegate to workers with prefetching
             IteratorImpl::InMemoryMulti {
                 worker_manager,
                 batch_indices,
@@ -483,13 +604,14 @@ where
                             let batch_size = indices.len();
                             if let Err(e) = worker_manager.send_task(indices) {
                                 return Some(Err(e.context(format!(
-                                    "Failed to send batch of {} indices to workers (pending tasks: {})",
+                                    "Failed to send batch of {} indices to workers \
+                                    (pending tasks: {}, workers may be overloaded)",
                                     batch_size, *pending_tasks
                                 ))));
                             }
                             *pending_tasks += 1;
                         }
-                        None => break,
+                        None => break, // No more batches to send
                     }
                 }
 
@@ -501,12 +623,13 @@ where
                             Some(result)
                         }
                         Err(e) => Some(Err(e.context(format!(
-                            "Failed to receive batch from workers (pending tasks: {}, timeout: {:?})",
-                            *pending_tasks, config.timeout
+                            "Failed to receive batch from workers after {:?} \
+                            (pending tasks: {}, possible deadlock or slow transform)",
+                            config.timeout, *pending_tasks
                         )))),
                     }
                 } else {
-                    None
+                    None // All batches consumed
                 }
             }
 
@@ -517,18 +640,29 @@ where
             } => {
                 let mut samples = Vec::with_capacity(config.batch_size);
 
+                // Collect samples up to batch_size
                 for _ in 0..config.batch_size {
                     match dataset_iter.next() {
                         Some(Ok(sample)) => samples.push(sample),
-                        Some(Err(e)) => return Some(Err(e)),
-                        None => break,
+                        Some(Err(e)) => {
+                            return Some(Err(
+                                e.context("Failed to load sample from iterable dataset")
+                            ))
+                        }
+                        None => break, // End of dataset
                     }
                 }
 
+                // Check if we should return this batch
                 if samples.is_empty() || (config.drop_last && samples.len() < config.batch_size) {
                     None
                 } else {
-                    Some(config.collator.collate(&samples))
+                    Some(config.collator.collate(&samples).with_context(|| {
+                        format!(
+                            "Failed to collate streaming batch of {} samples",
+                            samples.len()
+                        )
+                    }))
                 }
             }
 
@@ -538,6 +672,7 @@ where
                 sample_buffer,
                 config,
             } => {
+                // Buffer samples until we have a full batch
                 while sample_buffer.len() < config.batch_size {
                     match worker_pool
                         .output_rx
@@ -563,6 +698,7 @@ where
                     }
                 }
 
+                // Decide whether to return a batch
                 if sample_buffer.is_empty()
                     || (config.drop_last && sample_buffer.len() < config.batch_size)
                 {
@@ -691,6 +827,7 @@ where
                         move |_task_rx, output_tx, shutdown| {
                             let worker_id = WORKER_ID.with(|id| *id.borrow());
 
+                            // Process assigned shards
                             for sample_result in dataset.iter_sharded(worker_id, num_workers) {
                                 if shutdown.load(Ordering::Relaxed) {
                                     break;
@@ -704,17 +841,20 @@ where
                                 });
 
                                 if output_tx.send(sample_result_with_context).is_err() {
+                                    // Channel closed, stop processing
                                     break;
                                 }
                             }
                         },
-                    )?;
+                    )
+                    .context("Failed to create worker pool for streaming")?;
                     IteratorImpl::IterableMulti {
                         worker_pool,
                         sample_buffer: Vec::new(),
                         config,
                     }
                 } else {
+                    // Single-threaded iteration
                     IteratorImpl::IterableSingle {
                         dataset_iter: self.dataset.iter(),
                         config,
@@ -726,7 +866,9 @@ where
                     inner,
                 })
             }
-            _ => Err(anyhow!("Invalid loader implementation for IterableDataset")),
+            _ => Err(anyhow!(
+                "Internal error: Invalid loader implementation for IterableDataset"
+            )),
         }
     }
 }
@@ -745,7 +887,16 @@ thread_local! {
 }
 
 /// Thread pool for parallel data loading.
-/// Managers worker lifecycle and communication channels.
+/// Manages worker lifecycle and communication channels.
+///
+/// # Design:
+/// - Task channel: Main thread → Workers
+/// - Output channel: Workers → Main thread
+/// - Shutdown flag: Graceful termination
+///
+/// # Generic Parameters
+/// - `Task`: Work items sent to workers
+/// - `Output`: Results returned from workers
 struct WorkerPool<Task, Output> {
     workers: Vec<thread::JoinHandle<()>>,
     task_tx: Sender<Task>,
@@ -764,17 +915,28 @@ where
     /// - `num_workers`: Number of worker threads (must be > 0)
     /// - `buffer_size`: Channel buffer size (must be > 0)
     /// - `worker_fn`: Function each worker executes.
+    ///
+    /// # Errors
+    /// - Invalid parameters (0 workers or buffer size)
+    /// - Thread spawn failure
     fn new<F>(num_workers: usize, buffer_size: usize, worker_fn: F) -> Result<Self>
     where
         F: Fn(Receiver<Task>, Sender<Output>, Arc<AtomicBool>) + Send + Sync + 'static,
     {
         if num_workers == 0 {
-            return Err(anyhow!("Cannot create WorkerPool with 0 workers"));
+            return Err(anyhow!(
+                "Cannot create WorkerPool with 0 workers. \
+                Either set num_workers > 0 or use single-threaded mode. "
+            ));
         }
 
         if buffer_size == 0 {
-            return Err(anyhow!("Cannot create WorkerPool with buffer_size 0"));
+            return Err(anyhow!(
+                "Cannot create WorkerPool with buffer_size 0. \
+                Buffer size must be > 0 to prevent deadlocks."
+            ));
         }
+
         let (task_tx, task_receiver) = bounded(buffer_size);
         let (task_result_sender, output_rx) = bounded(buffer_size);
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -788,14 +950,20 @@ where
             let shutdown_clone = shutdown.clone();
             let worker_fn_clone = worker_fn.clone();
 
-            let handle = thread::spawn(move || {
-                WORKER_ID.with(|id| *id.borrow_mut() = worker_id);
-                worker_fn_clone(
-                    task_receiver_clone,
-                    task_result_sender_clone,
-                    shutdown_clone,
-                );
-            });
+            let handle = thread::Builder::new()
+                .name(format!("dataloader-worker-{}", worker_id))
+                .spawn(move || {
+                    // Set thread-local worker ID
+                    WORKER_ID.with(|id| *id.borrow_mut() = worker_id);
+
+                    // Run worker function
+                    worker_fn_clone(
+                        task_receiver_clone,
+                        task_result_sender_clone,
+                        shutdown_clone,
+                    );
+                })
+                .with_context(|| format!("Failed to spawn worker thread {}", worker_id))?;
 
             workers.push(handle);
         }
@@ -812,7 +980,10 @@ where
 /// Sets the shutdown flag and waits for all workers to finish gracefully.
 impl<Task, Output> Drop for WorkerPool<Task, Output> {
     fn drop(&mut self) {
+        // Signal shutdown to all workers
         self.shutdown.store(true, Ordering::Relaxed);
+
+        // Wait for workers to finish
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
@@ -824,6 +995,11 @@ impl<Task, Output> Drop for WorkerPool<Task, Output> {
 // ================================================================================================
 /// Manages workers for in-memory datasets.
 /// Workers share the dataset via Arc to avoid memory duplication.
+///
+/// # Design
+/// - Zero-copy dataset sharing via Arc
+/// - Lazy sample fetching (no pre-caching)
+/// - Bounded channels prevent memory bloat
 struct InMemoryWorkerManager {
     worker_pool: WorkerPool<Vec<usize>, Result<MiniBatch>>,
 }
@@ -848,6 +1024,7 @@ impl InMemoryWorkerManager {
             num_workers,
             buffer_size,
             move |task_rx: Receiver<Vec<usize>>, output_tx: Sender<Result<MiniBatch>>, shutdown| {
+                let worker_id = WORKER_ID.with(|id| *id.borrow());
                 // Each worker has a shared reference to the dataset
                 let dataset = dataset.clone(); // Arc clone - cheap!
                 let collator = collator.clone();
@@ -858,10 +1035,14 @@ impl InMemoryWorkerManager {
                             let batch_size = indices.len();
                             let result = Self::process_batch_lazy(&dataset, &indices, &collator)
                                 .with_context(|| {
-                                    format!("Failed to process batch with {} indices", batch_size)
+                                    format!(
+                                        "Worker {} failed to process batch with {} indices",
+                                        worker_id, batch_size
+                                    )
                                 });
 
                             if output_tx.send(result).is_err() {
+                                // Output channel closed, exit
                                 break;
                             }
                         }
@@ -870,7 +1051,8 @@ impl InMemoryWorkerManager {
                     }
                 }
             },
-        )?;
+        )
+        .context("Failed to create worker pool for in-memory dataset")?;
         Ok(Self { worker_pool })
     }
 
@@ -942,6 +1124,9 @@ impl InMemoryWorkerManager {
 struct IterableWorkerManager {
     // Remove the worker_pool field - we will create workers fresh for each iteration for now.
     // TODO: implement persistent_workers that can be reused across iterations.
+    // Future fields:
+    // - persistent_pool: Option<WorkerPool<...>>
+    // - reset_strategy: WorkerResetStrategy
 }
 
 impl IterableWorkerManager {
@@ -1322,7 +1507,12 @@ mod tests {
 
         match iter.next() {
             Some(Err(e)) => {
-                assert!(e.to_string().contains("timeout"));
+                let error_string = format!("{:?}", e);
+                assert!(
+                    error_string.to_lowercase().contains("timeout"),
+                    "Expected timeout error, but got: {:?}",
+                    e
+                );
                 Ok(())
             }
             _ => Err(anyhow!("Expected timeout error")),
