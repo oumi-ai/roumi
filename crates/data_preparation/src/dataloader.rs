@@ -164,7 +164,7 @@ where
         sampler: impl Sampler<Item = usize> + Send + Sync + 'static,
         config: DataLoaderConfig,
     ) -> Result<Self> {
-        Self::with_collator(dataset, sampler, config, StackCollator)
+        Self::new_with_collator(dataset, sampler, config, StackCollator)
     }
 }
 
@@ -180,7 +180,7 @@ where
     /// - `sampler`: Sampling strategy (e.g., SequentialSampler, RandomSampler)
     /// - `config`: DataLoader configuration
     /// - `collator`: Custom collator for batching samples
-    pub fn with_collator(
+    pub fn new_with_collator(
         dataset: InMemoryDataset<Raw>,
         sampler: impl Sampler<Item = usize> + Send + Sync + 'static,
         config: DataLoaderConfig,
@@ -225,6 +225,109 @@ where
     }
 }
 
+impl<Raw> DataLoader<InMemoryDataset<Raw>, StackCollator>
+where
+    Raw: Clone + Send + Sync + 'static,
+{
+    /// Creates a DataLoader with custom batch sampler for advanced batching strategies.
+    /// Uses the default StackCollator.
+    ///
+    /// Use this when you need:
+    /// - Length-based bucketing (BatchBucketSampler) to minimize padding
+    /// - Class-balanced batching for imbalanced datasets
+    /// - Custom batching logic while using standard collation
+    ///
+    /// Note: config.batch_size is ignored since the sampler controls batching.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let bucket_sampler = BatchBucketSampler::new(sampler, 32, |i| lengths[i], 100)?;
+    /// let loader = DataLoader::new_with_batch_sampler(dataset, bucket_sampler, config)?;
+    /// ```
+    pub fn new_with_batch_sampler(
+        dataset: InMemoryDataset<Raw>,
+        batch_sampler: impl Sampler<Item = Vec<usize>> + Send + Sync + 'static,
+        config: DataLoaderConfig,
+    ) -> Result<Self> {
+        if config.batch_size != 1 {
+            eprintln!(
+                "Warning: DataLoader created with batch_sampler ignores config.batch_size={}. \
+                The batch_sampler controls batching.",
+                config.batch_size
+            );
+        }
+        Self::new_with_batch_sampler_and_collator(dataset, batch_sampler, config, StackCollator)
+    }
+}
+
+impl<Raw, C> DataLoader<InMemoryDataset<Raw>, C>
+where
+    Raw: Clone + Send + Sync + 'static,
+    C: Collator + Clone + Send + Sync + 'static,
+{
+    /// Creates a DataLoader with custom batch sampler and custom collator.
+    ///
+    /// Use this when you need:
+    /// - Custom batching strategy (e.g., length-based bucketing)
+    /// - Custom collation (e.g., PaddingCollator for variable-length sequences)
+    /// This is common in NLP where you may want to group similar-length sequences
+    /// AND pad them efficiently.
+    ///
+    /// Note: config.batch_size is ignored since the batch sampler controls batching.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let bucket_sampler = BatchBucketSampler::new(sampler, 32, |i| lengths[i], 100)?;
+    /// let padding_collator = PaddingCollator::new().pad("input_ids", vec![(0, PaddingRule::MaxLength)], None);
+    /// let loader = DataLoader::new_with_batch_sampler_and_collator(
+    ///     dataset, bucket_sampler, config, padding_collator
+    /// )?;
+    /// ```
+    pub fn new_with_batch_sampler_and_collator(
+        dataset: InMemoryDataset<Raw>,
+        batch_sampler: impl Sampler<Item = Vec<usize>> + Send + Sync + 'static,
+        config: DataLoaderConfig,
+        collator: C,
+    ) -> Result<Self> {
+        if config.prefetch_factor == 0 && config.num_workers > 0 {
+            return Err(anyhow!(
+                "Prefetch factor must be >0 when using {} workers",
+                config.num_workers
+            ));
+        }
+
+        if config.batch_size != 1 {
+            eprintln!(
+                "Warning: DataLoader created with batch_sampler ignores config.batch_size={}. \
+                The batch_sampler controls batching.",
+                config.batch_size
+            );
+        }
+
+        let worker_manager = if config.num_workers > 0 {
+            let shared_dataset = Arc::new(dataset.clone());
+            Some(Arc::new(InMemoryWorkerManager::new(
+                config.num_workers,
+                shared_dataset,
+                collator.clone(),
+                &config,
+            )?))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            dataset,
+            collator,
+            config,
+            current_epoch: std::cell::Cell::new(0),
+            loader_type: LoaderType::InMemory {
+                batch_sampler: Box::new(batch_sampler),
+                worker_manager,
+            },
+        })
+    }
+}
 // ================================================================================================
 // 3b. DataLoadeer Constructor for IterableDataset
 // ================================================================================================
@@ -1224,5 +1327,186 @@ mod tests {
             }
             _ => Err(anyhow!("Expected timeout error")),
         }
+    }
+}
+
+#[cfg(test)]
+mod batch_sampler_tests {
+    use super::*;
+    use crate::collator::{PaddingCollator, PaddingRule};
+    use crate::sampler::{BatchBucketSampler, SequentialSampler};
+    use crate::transforms::Transform;
+    use tch::{Kind, Tensor};
+
+    // Transform that creates variable-length samples
+    struct VariableLengthTransform;
+    impl Transform<String, Sample> for VariableLengthTransform {
+        fn apply(&self, input: String) -> Result<Sample> {
+            // Create tensor with length matching string length
+            let len = input.len();
+            let data = vec![1i64; len];
+            Ok(Sample::from_single("input_ids", Tensor::from_slice(&data)))
+        }
+    }
+
+    #[test]
+    fn test_new_with_batch_sampler() -> Result<()> {
+        // Create dataset with SAME-LENGTH strings for StackCollator
+        let data: Vec<String> = vec![
+            "12345".into(), // length 5
+            "abcde".into(), // length 5
+            "hello".into(), // length 5
+            "world".into(), // length 5
+            "tests".into(), // length 5
+            "rustc".into(), // length 5
+        ];
+
+        let dataset = InMemoryDataset::new(data.clone()).with_transform(VariableLengthTransform);
+        let base_sampler = SequentialSampler::new(dataset.len());
+        let batch_sampler = BatchSampler::new(base_sampler, 2, false)?;
+
+        let config = DataLoaderConfig::builder().num_workers(0).build();
+
+        let loader = DataLoader::new_with_batch_sampler(dataset, batch_sampler, config)?;
+
+        // Collect all batches
+        let batches: Vec<_> = loader.iter()?.collect::<Result<Vec<_>>>()?;
+
+        // Should have 3 batches (6 samples / batch_size 2)
+        assert_eq!(batches.len(), 3);
+
+        // Verify each batch has correct size
+        for (i, batch) in batches.iter().enumerate() {
+            let tensor = batch.get("input_ids")?;
+            assert_eq!(tensor.size(), &[2, 5], "Batch {} has wrong shape", i);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_new_with_batch_sampler_and_collator() -> Result<()> {
+        // Create dataset with variable-length strings
+        let data: Vec<String> = vec![
+            "short".into(),
+            "medium text".into(),
+            "a much longer text".into(),
+            "tiny".into(),
+            "another medium one".into(),
+            "the longest text of all".into(),
+        ];
+
+        let dataset = InMemoryDataset::new(data.clone()).with_transform(VariableLengthTransform);
+
+        // Create a batch bucket sampler that groups by length
+        let base_sampler = SequentialSampler::new(dataset.len());
+        let data_clone = data.clone();
+        let bucket_sampler = BatchBucketSampler::new(
+            base_sampler,
+            2,                                       // batch_size
+            false,                                   // drop_last
+            move |idx| data_clone[idx].len() as f64, // sort by string length
+            2,                                       // bucket_size_multiplier (bucket_size = 4)
+            42,                                      // seed
+        )?;
+
+        // Use PaddingCollator since sequences have different lengths
+        let padding_collator =
+            PaddingCollator::new().pad("input_ids", vec![(0, PaddingRule::MaxLength)], Some(0.0));
+
+        let config = DataLoaderConfig::builder()
+            .num_workers(0) // Single-threaded for deterministic test
+            .build();
+
+        let loader = DataLoader::new_with_batch_sampler_and_collator(
+            dataset,
+            bucket_sampler,
+            config,
+            padding_collator, // Need padding for variable lengths
+        )?;
+
+        // Collect all batches
+        let batches: Vec<_> = loader.iter()?.collect::<Result<Vec<_>>>()?;
+
+        // Should have 3 batches (6 samples / batch_size 2)
+        assert_eq!(batches.len(), 3);
+
+        // Verify batches contain similar-length sequences
+        for batch in batches {
+            let tensor = batch.get("input_ids")?;
+            let batch_size = tensor.size()[0];
+
+            if batch_size > 1 {
+                // Get original lengths (non-padding values)
+                let seq0 = tensor.select(0, 0);
+                let seq1 = tensor.select(0, 1);
+
+                let len0 = seq0.ne(0).sum(Kind::Int64).int64_value(&[]);
+                let len1 = seq1.ne(0).sum(Kind::Int64).int64_value(&[]);
+
+                let diff = (len0 - len1).abs();
+
+                // Bucket sampler should group similar lengths
+                assert!(
+                    diff <= 10,
+                    "Length difference {} too large, bucket sampler not working",
+                    diff
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_batch_sampler_ignores_config_batch_size() -> Result<()> {
+        let data = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let dataset = InMemoryDataset::new(data).with_transform(VariableLengthTransform);
+
+        // Batch sampler with batch_size=1
+        let base = SequentialSampler::new(dataset.len());
+        let batch_sampler = BatchSampler::new(base, 1, false)?;
+
+        // Config with different batch_size=10 (should be ignored)
+        let config = DataLoaderConfig::builder().batch_size(10).build();
+
+        let loader = DataLoader::new_with_batch_sampler(dataset, batch_sampler, config)?;
+
+        let batches: Vec<_> = loader.iter()?.collect::<Result<Vec<_>>>()?;
+
+        // Should have 3 batches of size 1, not 1 batch of size 3
+        assert_eq!(batches.len(), 3);
+        for batch in batches {
+            assert_eq!(batch.batch_size()?, 1);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_batch_sampler_with_workers() -> Result<()> {
+        let data: Vec<String> = (0..100).map(|i| format!("sample_{}", i)).collect();
+
+        let dataset = InMemoryDataset::new(data).with_transform(VariableLengthTransform);
+
+        // Custom batch sampler
+        let base = SequentialSampler::new(dataset.len());
+        let batch_sampler = BatchSampler::new(base, 10, false)?;
+
+        let config = DataLoaderConfig::builder()
+            .num_workers(2)
+            .prefetch_factor(2)
+            .build();
+
+        let loader = DataLoader::new_with_batch_sampler(dataset, batch_sampler, config)?;
+
+        let mut total_samples = 0;
+        for batch in loader.iter()? {
+            let batch = batch?;
+            total_samples += batch.batch_size()? as usize;
+        }
+
+        assert_eq!(total_samples, 100);
+        Ok(())
     }
 }
