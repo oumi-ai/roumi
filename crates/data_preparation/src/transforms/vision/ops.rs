@@ -1,7 +1,7 @@
+use crate::dataloader::worker_gen_bool;
 use crate::transforms::Transform;
 use anyhow::{ensure, Context, Result};
 use image::{imageops::FilterType, DynamicImage, GenericImageView};
-use rand::Rng;
 use tch::{Kind, Tensor};
 
 /// This script contains transformations useful for image preprocessing.
@@ -91,8 +91,7 @@ impl RandomHorizontalFlip {
 
 impl Transform<DynamicImage, DynamicImage> for RandomHorizontalFlip {
     fn apply(&self, img: DynamicImage) -> Result<DynamicImage> {
-        let mut rng = rand::rng();
-        Ok(if rng.random_bool(self.p) {
+        Ok(if worker_gen_bool(self.p) {
             img.fliph()
         } else {
             img

@@ -13,7 +13,7 @@ pub trait Collator {
 /// along the batch dimension (dim 0). It does not implement any
 /// padding logic here, so if any sample has inconsistent shape,
 /// an error is returned.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StackCollator;
 
 impl Collator for StackCollator {
@@ -81,7 +81,7 @@ impl Collator for StackCollator {
 
 //=======================================================================================================
 /// Defines how a tensor should be padded across a batch
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PaddingRule {
     // Pad to maximum size of batch
     MaxLength,
@@ -115,7 +115,7 @@ pub enum PaddingRule {
 ///     //fixed length padding to the right on dimension 1 to 22, with custom pad_value = -100.0
 ///     .pad("labels", vec![(1, PaddingRule::FixedRight(22))], Some(-100.0))   
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PaddingCollator {
     // Per-feature padding configuration:
     // maps feature names to list of `(dimension, padding rule)` pairs

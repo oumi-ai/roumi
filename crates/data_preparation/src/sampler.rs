@@ -24,6 +24,28 @@ pub trait Sampler: Send + Sync {
     type Item: Send + Sync;
 
     fn iter(&self, epoch: usize) -> Box<dyn Iterator<Item = Self::Item> + Send + '_>;
+
+    /// Returns the base seed if this sampler uses randomness.
+    ///
+    /// This enables DataLoader to coordinate seeds between sampling and
+    /// worker/transform randomness for full reproducibility.
+    ///
+    /// Default implementation returns None (for non-random samplers).
+    fn seed(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// Make Box<dyn Sampler> implement Sampler
+impl<T: ?Sized> Sampler for Box<T>
+where
+    T: Sampler,
+{
+    type Item = T::Item;
+
+    fn iter(&self, epoch: usize) -> Box<dyn Iterator<Item = Self::Item> + Send + '_> {
+        (**self).iter(epoch)
+    }
 }
 
 /// ============================================================================
@@ -159,6 +181,10 @@ impl Sampler for RandomSampler {
             Box::new(indices.into_iter())
         }
     }
+
+    fn seed(&self) -> Option<u64> {
+        Some(self.base_seed)
+    }
 }
 
 /// ============================================================================
@@ -226,6 +252,10 @@ impl Sampler for SubsetRandomSampler {
         let mut shuffled = self.indices.clone();
         shuffled.shuffle(&mut rng);
         Box::new(shuffled.into_iter())
+    }
+
+    fn seed(&self) -> Option<u64> {
+        Some(self.base_seed)
     }
 }
 
@@ -370,6 +400,10 @@ impl Sampler for WeightedRandomSampler {
             Box::new(scored_indices.into_iter().map(|(index, _)| index))
         }
     }
+
+    fn seed(&self) -> Option<u64> {
+        Some(self.base_seed)
+    }
 }
 
 /// ============================================================================
@@ -444,6 +478,10 @@ impl<S: Sampler> Sampler for BatchSampler<S> {
             }
         }))
     }
+
+    fn seed(&self) -> Option<u64> {
+        self.sampler.seed()
+    }
 }
 
 /// ============================================================================
@@ -514,6 +552,10 @@ impl<H: Clone + Send + Sync> Sampler for ShardSampler<H> {
             shards.shuffle(&mut rng);
         }
         Box::new(shards.into_iter())
+    }
+
+    fn seed(&self) -> Option<u64> {
+        Some(self.base_seed)
     }
 }
 
@@ -658,6 +700,10 @@ impl Sampler for DistributedSampler {
                 .skip(self.rank)
                 .step_by(self.num_replicas),
         )
+    }
+
+    fn seed(&self) -> Option<u64> {
+        Some(self.base_seed)
     }
 }
 
@@ -847,6 +893,14 @@ where
                 batches_in_bucket.into_iter()
             });
         Box::new(iter)
+    }
+
+    fn seed(&self) -> Option<u64> {
+        // Has two sources of randomness:
+        // 1. The wrapped sampler's randomness
+        // 2. Its own shuffle within buckets
+        // Return the wrapped sampler's seed as the primary seed
+        self.bucket_sampler.seed()
     }
 }
 

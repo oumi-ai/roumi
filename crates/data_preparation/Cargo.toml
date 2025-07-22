@@ -20,6 +20,7 @@ bytemuck = "1.23.0"
 image = "0.24"
 rand = "0.9.1"
 tokenizers = {version = "0.21", features = ["http"]}
+crossbeam-channel = "0.5.15"
 
 
 [dev-dependencies]
