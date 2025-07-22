@@ -1,5 +1,5 @@
 use crate::sample::Sample;
-use crate::transform::Transform;
+use crate::transforms::Transform;
 
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;

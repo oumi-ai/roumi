@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 use tch::Tensor;
 
@@ -88,6 +88,21 @@ impl Sample {
     /// Returns an iterator over all feature names in this `Sample`.
     pub fn features(&self) -> impl Iterator<Item = &str> {
         self.features.keys().map(String::as_str)
+    }
+
+    /// Merges two samples, returning an error if any feature names collide.
+    #[inline]
+    pub fn merge(self, other: Sample) -> Result<Self> {
+        let mut features = self.features;
+        features.reserve(other.features.len()); // Pre-allocate for merge
+
+        for (key, tensor) in other.features {
+            if let Some(_existing) = features.insert(key.clone(), tensor) {
+                return Err(anyhow::anyhow!("Duplicate feature: {}", key))
+                    .context("Failed merging samples");
+            }
+        }
+        Ok(Self { features })
     }
 }
 

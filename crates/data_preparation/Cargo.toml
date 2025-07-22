@@ -17,6 +17,10 @@ arrow = "54.3.1"
 parquet = { version = "54.3.1", features = ["arrow"] }
 safetensors = "0.5.3"
 bytemuck = "1.23.0"
+image = "0.24"
+rand = "0.9.1"
+tokenizers = {version = "0.21", features = ["http"]}
+
 
 [dev-dependencies]
 criterion = "0.5"
